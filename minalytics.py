@@ -9,7 +9,7 @@ logger.setLevel(logging.INFO)
 from cachier import cachier
 from collections import Counter
 from pprint import pprint, pformat
-from sklearn import preprocessing, metrics, linear_model
+from sklearn import preprocessing, metrics, linear_model, model_selection
 from xlrd import open_workbook
 import cPickle as pickle
 import datetime
@@ -19,7 +19,35 @@ import scipy as sci
 import statsmodels.api as sm
 import time
 
-@cachier(stale_after=datetime.timedelta(days=1))
+# This ratio referes to the proportion of non-empty values to empty values in a column.
+# Columns which have too many empty values are ignored.
+NONEMPTY_MIN_RATIO = 0.3
+
+# Any column whose name contains at least one of these words (case-insensitive) is
+# treated as a target for the regression.
+TARGET_COL_TERMS = ['capitalization', 'value']
+
+# If the Pearson Correlation Coefficient between a data column and any target column
+# is greater than this value, it is ignored.
+CORR_THRESH = 0.95
+
+# If any value in a column is longer than this many characters, it is treated as a
+# text column and ignored.
+TEXT_COL_MIN_LEN = 500
+
+# Multi-category columns contain comma-delimited values. This is the minimum number of times
+# a comma-delimited value needs to be found in order for that column to be treated
+# as a multi-category column.
+MIN_DUP_PART_COUNT = 2
+
+# Category columns contain a single value. If the ratio of unique values in a column to the
+# total number of rows is too high, it won't contain any predictive value.
+# This is the maximum allowed value before a column is ignored. Setting this value aggressively
+# low (e.g. 0.01) reduces the number of columns, and thus the time required to complete the
+# regression.
+MAX_UNIQUE_VALS_TO_ROWS = 0.01
+
+@cachier()
 def load_dataframe():
   data_fname = 'snlworkbook_Combined.xls'
   wb = open_workbook(data_fname)
@@ -33,6 +61,9 @@ def load_dataframe():
     for col in range(sheet.ncols):
       value = sheet.cell(row, col).value
       if set_col_names:
+        # handle duplicate col names
+        while value in col_names:
+          value += '_'
         col_names.append(value)
       else:
         row_values.append(value)
@@ -68,7 +99,9 @@ def parse_cols(df):
 
   for i_col, (col, dtype) in enumerate(zip(df.columns, df.dtypes)):
     vals = df[col]
+    logger.info('Col %s: [%s]' % (i_col, col))
     if dtype == np.float64:
+      logger.info('\t==> Numerical')
       num_cols.append(col)
     elif dtype == np.object:
       nonempty_vals = [unicode(v) for v in vals if v not in ['', None]]
@@ -77,14 +110,13 @@ def parse_cols(df):
         empty_cols.append(col)
         continue
 
-      logger.info('%s: [%s]' % (i_col, col))
-      logger.info('first 4 unique_vals: %s' % '\n\t'.join(list([''] + [truncate(s) for s in unique_vals])[:5]))
+      logger.debug('first 4 unique_vals: %s' % '\n\t'.join(list([''] + [truncate(s) for s in unique_vals])[:5]))
 
       logger.debug('len(unique_vals): %s, len(nonempty_vals): %s' % (len(unique_vals), len(nonempty_vals)))
       max_unique_val_len = max(len(v) for v in unique_vals)
       longest_unique_val = [v for v in unique_vals if len(v) == max_unique_val_len][0]
       logger.debug('max_unique_val_len: %s, longest_unique_val: %s' % (max_unique_val_len, longest_unique_val))
-      if (len(unique_vals) == len(nonempty_vals) or max_unique_val_len > 500):
+      if (len(unique_vals) == len(nonempty_vals) or max_unique_val_len > TEXT_COL_MIN_LEN):
         cols_target = text_cols
       else:
         part_counts = Counter()
@@ -120,7 +152,7 @@ def parse_cols(df):
           parts = [p.strip() for p in u.split(',')]
           part_counts.update(Counter(parts))
 
-        dup_part_counts = {part: count for part, count in part_counts.items() if count > 2}
+        dup_part_counts = {part: count for part, count in part_counts.items() if count > MIN_DUP_PART_COUNT}
         dup_part_counts_by_col[col] = dup_part_counts
         logger.debug('dup_part_counts:\n%s' % pformat(dup_part_counts))
         if dup_part_counts:
@@ -133,14 +165,14 @@ def parse_cols(df):
       logger.debug('dup_val_counts:\n%s' % pformat(dup_val_counts))
 
       if cols_target is cat_cols:
-        logger.info('cat_col')
+        logger.info('\t==> Categorical')
       elif cols_target is text_cols:
-        logger.info('text_col')
+        logger.info('\t==> Textual')
       else:
-        logger.info('multi_cat_col')
+        logger.info('\t==> Multi-Categorical')
       cols_target.append(col)
 
-      logger.info('*' * 40)
+      logger.debug('*' * 40)
 
     else:
       raise 'Unknown column type'
@@ -151,10 +183,10 @@ def parse_cols(df):
       rval[truncate(key)] = val
     return rval
 
-  logger.info('num_cols:\n%s' % pformat(num_cols))
-  logger.info('text_cols:\n%s' % pformat(text_cols))
-  logger.info('cat_cols:\n%s' % pformat({col: truncate_keys(dup_part_counts_by_col[col]) for col in cat_cols}))
-  logger.info('multi_cat_cols:\n%s' % pformat({col: truncate_keys(dup_part_counts_by_col[col]) for col in multi_cat_cols}))
+  logger.debug('num_cols:\n%s' % pformat(num_cols))
+  logger.debug('text_cols:\n%s' % pformat(text_cols))
+  logger.debug('cat_cols:\n%s' % pformat({col: truncate_keys(dup_part_counts_by_col[col]) for col in cat_cols}))
+  logger.debug('multi_cat_cols:\n%s' % pformat({col: truncate_keys(dup_part_counts_by_col[col]) for col in multi_cat_cols}))
 
   return {
     ColType.NUM: num_cols,
@@ -166,8 +198,7 @@ def parse_cols(df):
 
   #return num_cols, text_cols, cat_cols, multi_cat_cols, empty_cols
 
-def remove_empty_cols(df, ignore_cols=None, min_ratio=0.3):
-  ignore_cols = ignore_cols or []
+def remove_empty_cols(df, min_ratio=NONEMPTY_MIN_RATIO):
   col_ratios = []
   for col in df.columns:
     vals = df[col]
@@ -177,13 +208,18 @@ def remove_empty_cols(df, ignore_cols=None, min_ratio=0.3):
     else:
       nonempty = []
     num_nonempty = len(nonempty)
-    ratio = round(1.0 * num_nonempty / num_vals, 2)
+    ratio = 1.0 * num_nonempty / num_vals
     col_ratios.append((ratio, col))
-  col_ratios.sort(key=lambda x: x[0])
-  logger.info('col_ratios: %s' % pformat(col_ratios))
 
-  cols_to_remove = set([col for ratio, col in col_ratios
-                        if ratio < min_ratio or col in ignore_cols])
+  col_ratios.sort(key=lambda x: x[0], reverse=True)
+  logger.debug('col_ratios: %s' % pformat(col_ratios))
+
+  cols_to_remove = set()
+  for ratio, col in col_ratios:
+    if ratio < min_ratio:
+      logger.info('\tCol is %.2f%% empty, removing: %s' % (ratio*100, col))
+      cols_to_remove.add(col)
+
   remove_columns(df, cols_to_remove)
 
 def remove_columns(df, cols):
@@ -207,7 +243,7 @@ def convert_multi_to_onehot(df, cols_by_type):
     for i, (part, count) in enumerate(part_counts_to_add.items()):
       col_name = '%s_%s' % (col, part)
       new_cols.append(col_name)
-      logger.info('Adding column %d of %d: %s' % (i, num_to_add, col_name))
+      logger.info('\tAdding column %d of %d: %s' % (i, num_to_add, col_name))
       num_added += 1
       df[col_name] = df[col].map(lambda x: 1 if x and part in x else 0)
     num_added -= 1
@@ -215,18 +251,16 @@ def convert_multi_to_onehot(df, cols_by_type):
   assert len(df.columns) == prev_num_cols + num_added, (len(df.columns), prev_num_cols, num_added)
   cols_by_type[ColType.MULTI].extend(new_cols)
 
-def expand_categories(df, cols_by_type, max_unique_vals_to_rows=0.01):
+def convert_cat_to_onehot(df, cols_by_type, max_unique_vals_to_rows=MAX_UNIQUE_VALS_TO_ROWS):
   num_cols_to_add = 0
   #unique_vals_by_col = {}
   for col in sorted(cols_by_type[ColType.CAT]):
-    logger.info('col: %s' % col)
     vals = df[col]
     unique_vals = set(vals) - set([None])
     #unique_vals_by_col[col] = unique_vals
     unique_vals_to_rows = 1.0 * len(unique_vals) / df.shape[0]
-    logger.info('\tunique_vals_to_rows: %.2f, len(unique_vals): %s' % (unique_vals_to_rows, len(unique_vals)))
     if 1.0 * len(unique_vals) / df.shape[0] > max_unique_vals_to_rows:
-      logger.info('\t(removing)')
+      logger.info('\tRemoving column, unique_vals_to_rows: %.4f, col: %s, len(unique_vals): %s' % (unique_vals_to_rows, col, len(unique_vals)))
       cols_by_type[ColType.CAT].remove(col)
       del df[col]
     else:
@@ -241,35 +275,71 @@ def expand_categories(df, cols_by_type, max_unique_vals_to_rows=0.01):
       assert len(new_cols) == len(unique_vals), (len(new_cols), len(unique_vals))
   return df
 
+def remove_target_correlations(df, corr_thresh=CORR_THRESH):
+  corrs = df.corr().abs()
+  cols = corrs.columns.values.tolist()
+  corr_col_tups = []
+  for row in corrs.index:
+    for col in corrs.columns:
+      if row == col:
+        continue
+      corr = corrs.loc[row][col]
+      corr_col_tups.append((corr, row, col))
+  corr_col_tups.sort(key=lambda x: x[0], reverse=True)
+  cols_to_remove = set()
+  for corr, col1, col2 in corr_col_tups:
+    col1_is_target = any([word in col1.lower() for word in TARGET_COL_TERMS])
+    col2_is_target = any([word in col2.lower() for word in TARGET_COL_TERMS])
+    if col1_is_target and col2_is_target:
+      continue
+    if corr < corr_thresh:
+      continue
+    if not (col1_is_target or col2_is_target):
+      continue
+
+    col_to_remove = col1 if col2_is_target else col2 
+    if col_to_remove in cols_to_remove:
+      continue
+
+    # display correlated values
+    vals1 = df[col1].values
+    vals2 = df[col2].values
+    this_df = pd.DataFrame(data={col1: vals1, col2: vals2})
+    logger.info('Dropping data column with suspiciously large correlation with target column, corr=%.4f\n%s' % (corr, this_df.dropna()[:10]))
+
+    cols_to_remove.add(col_to_remove)
+
+  for col in cols_to_remove:
+    del df[col]
+
 @cachier()
-def load_preproc_data():
+def prepare_data():
 
   df = load_dataframe()
-
   remove_empty_cols(df)
+
+  remove_target_correlations(df)
 
   cols_by_type = parse_cols(df)
 
   target_cols = [col for col in cols_by_type[ColType.NUM]
-                 if any(word in col.lower() for word in ['capitalization', 'value'])]
-  logger.info('target_cols: %s' % pformat(target_cols))
+                 if any(word in col.lower() for word in TARGET_COL_TERMS)]
+  logger.info('target_cols:\n\t%s' % '\n\t'.join(target_cols))
 
-  logger.info('df.shape: %s' % str(df.shape))
   logger.info('Converting multis...')
   convert_multi_to_onehot(df, cols_by_type)
 
-  logger.info('df.shape: %s' % str(df.shape))
-  logger.info('Expanding categories...')
-  df = expand_categories(df, cols_by_type)
+  logger.info('Converting categories...')
+  df = convert_cat_to_onehot(df, cols_by_type)
 
-  logger.info('df.shape: %s' % str(df.shape))
   logger.info('Removing text columns...')
   remove_columns(df, cols_by_type[ColType.TEXT])
 
   for col, dtype in zip(df.columns, df.dtypes):
     logger.debug('dtype: %s, col: %s' % (dtype, col))
 
-  logger.info('df.shape: %s' % str(df.shape))
+  rows, cols = df.shape
+  logger.info('rows: %s, cols: %s' % (rows, cols))
 
   return df, cols_by_type, target_cols
 
@@ -277,7 +347,7 @@ def main():
 
   logger.info('Preparing data...')
   start_time = time.time()
-  df, cols_by_type, target_cols = load_preproc_data(ignore_cache=True)
+  df, cols_by_type, target_cols = prepare_data(ignore_cache=True)
   logger.info('Done, took: %.2fs' % (time.time() - start_time))
 
   for target_col in target_cols:
@@ -286,34 +356,24 @@ def main():
     this_df = this_df.fillna(0)
     logger.debug('this_df.shape: %s' % str(this_df.shape))
     y = this_df[target_col].values
-    del this_df[target_col]
+    for _target_col in target_cols:
+        del this_df[_target_col]
     X = this_df.values
     logger.debug('X.shape: %s, y.shape: %s' % ((X.shape, y.shape)))
 
-    if 0:
-      X = sm.add_constant(X)
-      logger.info('fitting...')
-      model = sm.OLS(y, X).fit()
-      model.summary()
-
-    # TODO: scipy.sparse.csr_matrix
-
-    # normalize
-    # http://scikit-learn.org/stable/modules/preprocessing.html#preprocessing-normalization
     logger.debug('Normalizing...')
     X_norm = preprocessing.normalize(X)
 
+    cv = model_selection.KFold(n_splits=5)
+
     reg = linear_model.LinearRegression()
     logger.debug('Fitting...')
-    reg.fit(X_norm, y)
 
-    # TODO: cross val
-    logger.debug('Predicting...')
-    y_pred = reg.predict(X_norm)
-
-    r2 = metrics.r2_score(y, y_pred)
-    logger.info('r2: %s' % r2)
+    scores = model_selection.cross_val_score(reg, X, y, cv=cv)
+    score, std = scores.mean(), scores.std()
+    logger.info('R2: %.4f, std: %.4f' % (score, std))
     
 
 if __name__ == '__main__':
   main()
+
