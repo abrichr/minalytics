@@ -43,12 +43,15 @@ MIN_DUP_PART_COUNT = 2
 # regression.
 MAX_UNIQUE_VALS_TO_ROWS = 0.01
 
+# Set to True for verbose logging
+DEBUG = False
+
 
 import logging
 log_format = '%(asctime)s : %(name)s : %(levelname)s : %(message)s'
 logging.basicConfig(format=log_format, level=logging.WARN)
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
+logger.setLevel(logging.DEBUG if DEBUG else logging.INFO)
 
 from cachier import cachier
 from collections import Counter
