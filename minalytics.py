@@ -5,7 +5,7 @@ This script performs a regression in columns imported from an excel workbook.
 
 It performs the following tasks:
   - Import data from first worksheet in a workbook
-  - Determine columns are targets based on their names
+  - Determine which columns are targets based on their names (first row)
   - Remove data columns that are highly correlated with target columns
   - Determine column types (one of Numerical, Textual, Categorical and
     Multi-categorical)
