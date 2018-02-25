@@ -1,27 +1,23 @@
 from __future__ import print_function
 
-import logging
-log_format = '%(asctime)s : %(name)s : %(levelname)s : %(message)s'
-logging.basicConfig(format=log_format, level=logging.WARN)
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
+'''
+This script performs a regression in columns imported from an excel workbook.
 
-from cachier import cachier
-from collections import Counter
-from pprint import pprint, pformat
-from sklearn import preprocessing, metrics, linear_model, model_selection
-from xlrd import open_workbook
-import cPickle as pickle
-import datetime
-import pandas as pd
-import numpy as np
-import scipy as sci
-import statsmodels.api as sm
-import time
+It performs the following tasks:
+  - Import data from first worksheet in a workbook
+  - Determine columns are targets based on their names
+  - Remove data columns that are highly correlated with target columns
+  - Determine column types (one of Numerical, Textual, Categorical and Multi-categorical)
+  - Convert Categorical and Multi-Categorical to One-Hot representations
+  - Regress one target column at a time (ignoring other targets) via linear regression
+    with k-fold cross-validation
+  - Print Pearson's Correlation Coefficient and the standard deviation across folds for
+    each target
+'''
 
-# This ratio referes to the proportion of non-empty values to empty values in a column.
+# This ratio is the number of empty values divided by the total number of rows in a column.
 # Columns which have too many empty values are ignored.
-NONEMPTY_MIN_RATIO = 0.3
+MAX_EMPTY_RATIO = 0.7
 
 # Any column whose name contains at least one of these words (case-insensitive) is
 # treated as a target for the regression.
@@ -46,6 +42,26 @@ MIN_DUP_PART_COUNT = 2
 # low (e.g. 0.01) reduces the number of columns, and thus the time required to complete the
 # regression.
 MAX_UNIQUE_VALS_TO_ROWS = 0.01
+
+
+import logging
+log_format = '%(asctime)s : %(name)s : %(levelname)s : %(message)s'
+logging.basicConfig(format=log_format, level=logging.WARN)
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
+from cachier import cachier
+from collections import Counter
+from pprint import pprint, pformat
+from sklearn import preprocessing, metrics, linear_model, model_selection
+from xlrd import open_workbook
+import cPickle as pickle
+import datetime
+import pandas as pd
+import numpy as np
+import scipy as sci
+import statsmodels.api as sm
+import time
 
 @cachier()
 def load_dataframe():
@@ -198,7 +214,7 @@ def parse_cols(df):
 
   #return num_cols, text_cols, cat_cols, multi_cat_cols, empty_cols
 
-def remove_empty_cols(df, min_ratio=NONEMPTY_MIN_RATIO):
+def remove_empty_cols(df, max_empty_ratio=MAX_EMPTY_RATIO):
   col_ratios = []
   for col in df.columns:
     vals = df[col]
@@ -208,7 +224,7 @@ def remove_empty_cols(df, min_ratio=NONEMPTY_MIN_RATIO):
     else:
       nonempty = []
     num_nonempty = len(nonempty)
-    ratio = 1.0 * num_nonempty / num_vals
+    ratio = 1 - 1.0 * num_nonempty / num_vals
     col_ratios.append((ratio, col))
 
   col_ratios.sort(key=lambda x: x[0], reverse=True)
@@ -216,8 +232,8 @@ def remove_empty_cols(df, min_ratio=NONEMPTY_MIN_RATIO):
 
   cols_to_remove = set()
   for ratio, col in col_ratios:
-    if ratio < min_ratio:
-      logger.info('\tCol is %.2f%% empty, removing: %s' % (ratio*100, col))
+    if ratio > max_empty_ratio:
+      logger.info('\tCol is %.4f%% empty, removing: %s' % (ratio*100, col))
       cols_to_remove.add(col)
 
   remove_columns(df, cols_to_remove)
