@@ -7,40 +7,42 @@ It performs the following tasks:
   - Import data from first worksheet in a workbook
   - Determine columns are targets based on their names
   - Remove data columns that are highly correlated with target columns
-  - Determine column types (one of Numerical, Textual, Categorical and Multi-categorical)
+  - Determine column types (one of Numerical, Textual, Categorical and
+    Multi-categorical)
   - Convert Categorical and Multi-Categorical to One-Hot representations
-  - Regress one target column at a time (ignoring other targets) via linear regression
+  - Regress one target column at a time (ignoring other targets) via linear
+    regression
     with k-fold cross-validation
-  - Print Pearson's Correlation Coefficient and the standard deviation across folds for
-    each target
+  - Print Pearson's Correlation Coefficient and the standard deviation across
+    folds for each target
 '''
 
-# This ratio is the number of empty values divided by the total number of rows in a column.
-# Columns which have too many empty values are ignored.
+# This ratio is the number of empty values divided by the total number of rows
+# in a column. Columns which have too many empty values are ignored.
 MAX_EMPTY_RATIO = 0.7
 
-# Any column whose name contains at least one of these words (case-insensitive) is
-# treated as a target for the regression.
+# Any column whose name contains at least one of these words (case-insensitive)
+# is treated as a target for the regression.
 TARGET_COL_TERMS = ['capitalization', 'value']
 
-# If the Pearson Correlation Coefficient between a data column and any target column
-# is greater than this value, it is ignored.
-CORR_THRESH = 0.95
+# If the Pearson Correlation Coefficient between a data column and any target
+# column is greater than this value, it is ignored.
+CORR_THRESH = 0.9
 
-# If any value in a column is longer than this many characters, it is treated as a
-# text column and ignored.
+# If any value in a column is longer than this many characters, it is treated
+# as a text column and ignored.
 TEXT_COL_MIN_LEN = 500
 
-# Multi-category columns contain comma-delimited values. This is the minimum number of times
-# a comma-delimited value needs to be found in order for that column to be treated
-# as a multi-category column.
+# Multi-category columns contain comma-delimited values. This is the minimum
+# number of times a comma-delimited value needs to be found in order for that
+# column to be treated as a multi-category column.
 MIN_DUP_PART_COUNT = 2
 
-# Category columns contain a single value. If the ratio of unique values in a column to the
-# total number of rows is too high, it won't contain any predictive value.
-# This is the maximum allowed value before a column is ignored. Setting this value aggressively
-# low (e.g. 0.01) reduces the number of columns, and thus the time required to complete the
-# regression.
+# Category columns contain a single value. If the ratio of unique values in a
+# column to the # total number of rows is too high, it won't contain any
+# predictive value. This is the maximum allowed value before a column is
+# ignored. Setting this value aggressively low (e.g. 0.01) reduces the number
+# of columns, and thus the time required to complete the regression.
 MAX_UNIQUE_VALS_TO_ROWS = 0.01
 
 # Full path (or filename if in same directory) of excel workbook
@@ -132,13 +134,18 @@ def parse_cols(df):
         empty_cols.append(col)
         continue
 
-      logger.debug('first 4 unique_vals: %s' % '\n\t'.join(list([''] + [truncate(s) for s in unique_vals])[:5]))
+      logger.debug('first 4 unique_vals: %s' % '\n\t'.join(
+        list([''] + [truncate(s) for s in unique_vals])[:5]))
 
-      logger.debug('len(unique_vals): %s, len(nonempty_vals): %s' % (len(unique_vals), len(nonempty_vals)))
+      logger.debug('len(unique_vals): %s, len(nonempty_vals): %s' % (
+        len(unique_vals), len(nonempty_vals)))
       max_unique_val_len = max(len(v) for v in unique_vals)
-      longest_unique_val = [v for v in unique_vals if len(v) == max_unique_val_len][0]
-      logger.debug('max_unique_val_len: %s, longest_unique_val: %s' % (max_unique_val_len, longest_unique_val))
-      if (len(unique_vals) == len(nonempty_vals) or max_unique_val_len > TEXT_COL_MIN_LEN):
+      longest_unique_val = [v for v in unique_vals
+                            if len(v) == max_unique_val_len][0]
+      logger.debug('max_unique_val_len: %s, longest_unique_val: %s' % (
+        max_unique_val_len, longest_unique_val))
+      if (len(unique_vals) == len(nonempty_vals) or \
+          max_unique_val_len > TEXT_COL_MIN_LEN):
         cols_target = text_cols
       else:
         part_counts = Counter()
@@ -174,7 +181,8 @@ def parse_cols(df):
           parts = [p.strip() for p in u.split(',')]
           part_counts.update(Counter(parts))
 
-        dup_part_counts = {part: count for part, count in part_counts.items() if count > MIN_DUP_PART_COUNT}
+        dup_part_counts = {part: count for part, count in part_counts.items()
+                           if count > MIN_DUP_PART_COUNT}
         dup_part_counts_by_col[col] = dup_part_counts
         logger.debug('dup_part_counts:\n%s' % pformat(dup_part_counts))
         if dup_part_counts:
@@ -183,7 +191,8 @@ def parse_cols(df):
           cols_target = cat_cols
         
       val_counts = Counter(nonempty_vals)
-      dup_val_counts = {val: count for val, count in val_counts.items() if count > 1}
+      dup_val_counts = {val: count for val, count in val_counts.items()
+                        if count > 1}
       logger.debug('dup_val_counts:\n%s' % pformat(dup_val_counts))
 
       if cols_target is cat_cols:
@@ -207,8 +216,10 @@ def parse_cols(df):
 
   logger.debug('num_cols:\n%s' % pformat(num_cols))
   logger.debug('text_cols:\n%s' % pformat(text_cols))
-  logger.debug('cat_cols:\n%s' % pformat({col: truncate_keys(dup_part_counts_by_col[col]) for col in cat_cols}))
-  logger.debug('multi_cat_cols:\n%s' % pformat({col: truncate_keys(dup_part_counts_by_col[col]) for col in multi_cat_cols}))
+  logger.debug('cat_cols:\n%s' % pformat({
+    col: truncate_keys(dup_part_counts_by_col[col]) for col in cat_cols}))
+  logger.debug('multi_cat_cols:\n%s' % pformat({
+    col: truncate_keys(dup_part_counts_by_col[col]) for col in multi_cat_cols}))
 
   return {
     ColType.NUM: num_cols,
@@ -239,7 +250,7 @@ def remove_empty_cols(df, max_empty_ratio=MAX_EMPTY_RATIO):
   cols_to_remove = set()
   for ratio, col in col_ratios:
     if ratio > max_empty_ratio:
-      logger.info('\tCol is %.4f%% empty, removing: %s' % (ratio*100, col))
+      logger.info('\tCol is %.2f%% empty, removing: %s' % (ratio*100, col))
       cols_to_remove.add(col)
 
   remove_columns(df, cols_to_remove)
@@ -260,20 +271,23 @@ def convert_multi_to_onehot(df, cols_by_type):
       if val:
         part_counts.update(Counter(p.strip() for p in val.split(',')))
     min_count = 1
-    num_to_add = len([_ for _, count in part_counts.items() if count > min_count])
+    num_to_add = len([_ for _, count in part_counts.items()
+                      if count > min_count])
     part_counts_to_add = {p: c for p, c in part_counts.items() if c > min_count}
     for i, (part, count) in enumerate(part_counts_to_add.items()):
       col_name = '%s_%s' % (col, part)
       new_cols.append(col_name)
-      logger.info('\tAdding column %d of %d: %s' % (i, num_to_add, col_name))
+      logger.debug('\tAdding column %d of %d: %s' % (i, num_to_add, col_name))
       num_added += 1
       df[col_name] = df[col].map(lambda x: 1 if x and part in x else 0)
     num_added -= 1
     del df[col]
-  assert len(df.columns) == prev_num_cols + num_added, (len(df.columns), prev_num_cols, num_added)
+  assert len(df.columns) == prev_num_cols + num_added, (
+      len(df.columns), prev_num_cols, num_added)
   cols_by_type[ColType.MULTI].extend(new_cols)
 
-def convert_cat_to_onehot(df, cols_by_type, max_unique_vals_to_rows=MAX_UNIQUE_VALS_TO_ROWS):
+def convert_cat_to_onehot(df, cols_by_type,
+                          max_unique_vals_to_rows=MAX_UNIQUE_VALS_TO_ROWS):
   num_cols_to_add = 0
   #unique_vals_by_col = {}
   for col in sorted(cols_by_type[ColType.CAT]):
@@ -282,7 +296,9 @@ def convert_cat_to_onehot(df, cols_by_type, max_unique_vals_to_rows=MAX_UNIQUE_V
     #unique_vals_by_col[col] = unique_vals
     unique_vals_to_rows = 1.0 * len(unique_vals) / df.shape[0]
     if 1.0 * len(unique_vals) / df.shape[0] > max_unique_vals_to_rows:
-      logger.info('\tRemoving column, unique_vals_to_rows: %.4f, col: %s, len(unique_vals): %s' % (unique_vals_to_rows, col, len(unique_vals)))
+      logger.debug(('\tRemoving column, unique_vals_to_rows: %.4f, col: %s, '
+                    'len(unique_vals): %s') % (
+                  unique_vals_to_rows, col, len(unique_vals)))
       cols_by_type[ColType.CAT].remove(col)
       del df[col]
     else:
@@ -294,7 +310,8 @@ def convert_cat_to_onehot(df, cols_by_type, max_unique_vals_to_rows=MAX_UNIQUE_V
       logger.debug('\tlen(cols_after): %s' % len(cols_after))
       new_cols = cols_after - cols_before
       logger.debug('\tlen(new_cols): %s' % len(new_cols))
-      assert len(new_cols) == len(unique_vals), (len(new_cols), len(unique_vals))
+      assert len(new_cols) == len(unique_vals), (
+          len(new_cols), len(unique_vals))
   return df
 
 def remove_target_correlations(df, corr_thresh=CORR_THRESH):
@@ -308,14 +325,18 @@ def remove_target_correlations(df, corr_thresh=CORR_THRESH):
       corr = corrs.loc[row][col]
       corr_col_tups.append((corr, row, col))
   corr_col_tups.sort(key=lambda x: x[0], reverse=True)
+  logger.debug('corr_col_tups:\n%s' % pformat(corr_col_tups))
   cols_to_remove = set()
   for corr, col1, col2 in corr_col_tups:
-    col1_is_target = any([word in col1.lower() for word in TARGET_COL_TERMS])
-    col2_is_target = any([word in col2.lower() for word in TARGET_COL_TERMS])
-    if col1_is_target and col2_is_target:
-      continue
     if corr < corr_thresh:
       continue
+    col1_is_target = any([word in col1.lower() for word in TARGET_COL_TERMS])
+    col2_is_target = any([word in col2.lower() for word in TARGET_COL_TERMS])
+    # ignore correlations between target columns
+    if col1_is_target and col2_is_target:
+      continue
+    # ignore correlations between data columns
+    # TODO: remove data columns with perfect correlation
     if not (col1_is_target or col2_is_target):
       continue
 
@@ -327,7 +348,8 @@ def remove_target_correlations(df, corr_thresh=CORR_THRESH):
     vals1 = df[col1].values
     vals2 = df[col2].values
     this_df = pd.DataFrame(data={col1: vals1, col2: vals2})
-    logger.info('Dropping data column with suspiciously large correlation with target column, corr=%.4f\n%s' % (corr, this_df.dropna()[:10]))
+    logger.info(('Dropping data column with suspiciously large correlation '
+      'with target column, corr=%.4f\n%s') % (corr, this_df.dropna()[:10]))
 
     cols_to_remove.add(col_to_remove)
 
@@ -360,9 +382,6 @@ def prepare_data():
   for col, dtype in zip(df.columns, df.dtypes):
     logger.debug('dtype: %s, col: %s' % (dtype, col))
 
-  rows, cols = df.shape
-  logger.info('rows: %s, cols: %s' % (rows, cols))
-
   return df, cols_by_type, target_cols
 
 def main():
@@ -371,6 +390,9 @@ def main():
   start_time = time.time()
   df, cols_by_type, target_cols = prepare_data(ignore_cache=True)
   logger.info('Done, took: %.2fs' % (time.time() - start_time))
+
+  rows, cols = df.shape
+  logger.info('rows: %s, cols: %s' % (rows, cols))
 
   for target_col in target_cols:
     logger.info('target_col: %s' % target_col)
@@ -398,4 +420,3 @@ def main():
 
 if __name__ == '__main__':
   main()
-
