@@ -43,6 +43,9 @@ MIN_DUP_PART_COUNT = 2
 # regression.
 MAX_UNIQUE_VALS_TO_ROWS = 0.01
 
+# Full path (or filename if in same directory) of excel workbook
+EXCEL_WORKBOOK_PATH = 'snlworkbook_Combined.xls'
+
 # Set to True for verbose logging
 DEBUG = False
 
@@ -68,7 +71,7 @@ import time
 
 @cachier()
 def load_dataframe():
-  data_fname = 'snlworkbook_Combined.xls'
+  data_fname = EXCEL_WORKBOOK_PATH
   wb = open_workbook(data_fname)
 
   sheet = wb.sheets()[0]
