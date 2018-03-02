@@ -45,8 +45,14 @@ MIN_DUP_PART_COUNT = 2
 # of columns, and thus the time required to complete the regression.
 MAX_UNIQUE_VALS_TO_ROWS = 0.01
 
-# Full path (or filename if in same directory) of excel workbook
+# Path to Excel workbook
 EXCEL_WORKBOOK_PATH = 'snlworkbook_Combined.xls'
+
+# Path to magnetic grid file (text)
+MAGNETIC_GRID_PATH = '200 m mag deg.dat'
+
+# Path to augmented data file
+AUGMENTED_DATA_PATH = 'augmented_data.csv'
 
 # Set to True for verbose logging
 DEBUG = False
@@ -60,15 +66,19 @@ logger.setLevel(logging.DEBUG if DEBUG else logging.INFO)
 
 from cachier import cachier
 from collections import Counter
+from matplotlib import cm
+from mpl_toolkits.mplot3d import Axes3D
 from pprint import pprint, pformat
 from sklearn import preprocessing, metrics, linear_model, model_selection
 from xlrd import open_workbook
+import argparse
 import cPickle as pickle
+import csv
 import datetime
-import pandas as pd
+import matplotlib.pyplot as plt
 import numpy as np
-import scipy as sci
-import statsmodels.api as sm
+import os
+import pandas as pd
 import time
 
 @cachier()
@@ -356,8 +366,10 @@ def remove_target_correlations(df, corr_thresh=CORR_THRESH):
   for col in cols_to_remove:
     del df[col]
 
-@cachier()
 def prepare_data():
+
+  logger.info('Preparing data...')
+  start_time = time.time()
 
   df = load_dataframe()
   remove_empty_cols(df)
@@ -382,14 +394,14 @@ def prepare_data():
   for col, dtype in zip(df.columns, df.dtypes):
     logger.debug('dtype: %s, col: %s' % (dtype, col))
 
+  logger.info('Data preparation took: %.2fs' % (time.time() - start_time))
+
   return df, cols_by_type, target_cols
 
-def main():
+def do_simple_regression():
+  df, cols_by_type, target_cols = prepare_data()
 
-  logger.info('Preparing data...')
-  start_time = time.time()
-  df, cols_by_type, target_cols = prepare_data(ignore_cache=True)
-  logger.info('Done, took: %.2fs' % (time.time() - start_time))
+  import ipdb; ipdb.set_trace()
 
   rows, cols = df.shape
   logger.info('rows: %s, cols: %s' % (rows, cols))
@@ -416,7 +428,155 @@ def main():
     scores = model_selection.cross_val_score(reg, X, y, cv=cv)
     score, std = scores.mean(), scores.std()
     logger.info('R2: %.4f, std: %.4f' % (score, std))
-    
+
+
+def read_magnetic_data(
+    magnetic_grid_path=MAGNETIC_GRID_PATH
+):
+  # N: positive latitude
+  # S: negative latitude
+  # E: positive longitude
+  # W: negative longitude
+
+  logger.info('reading grid file: %s' % magnetic_grid_path)
+  start_time = time.time()
+  df = pd.read_csv(
+    magnetic_grid_path,
+    sep=',',
+    header=None,
+    names='y x mag lon lat'.split(),
+    dtype={
+      'y': np.int64,
+      'x': np.int64,
+      'mag': np.float64,
+      'lat': np.float64,
+      'lon': np.float64
+    }
+  )
+  logger.info('done, took: %.2fs' % (time.time() - start_time))
+
+  if 0:
+    logger.info('setting index...')
+    df = df.set_index(['lat', 'lon'])
+
+  if 0:
+    logger.info('writing to outfile...')
+    df.to_csv(magnetic_grid_path + '.degonly', header=False, index=False)
+    logger.info('done')
+
+  return df
+
+def get_lat_lon_cols(cols):
+  lat_cols = [c for c in cols if 'latitude' in c.lower()]
+  lon_cols = [c for c in cols if 'longitude' in c.lower()]
+  logger.info('lat_cols: %s' % lat_cols)
+  logger.info('lon_cols: %s' % lon_cols)
+  return lat_cols[0], lon_cols[0]
+
+def get_mag_region(df, row, lat_col, lon_col, box_size_m=2000):
+  try:
+    d_lat = abs(df.lat - row[lat_col])
+    d_lon = abs(df.lon - row[lon_col])
+    d_tot = d_lat + d_lon
+    argmin = d_tot.idxmin()
+    row = df.loc[argmin]
+    cx = row.x
+    cy = row.y
+    half_size = box_size_m / 2.0
+    x_mask = abs(df.x - cx) < half_size 
+    y_mask = abs(df.y - cy) < half_size 
+    mask = x_mask & y_mask
+    region = df[mask]
+    n_cols = len(region.x.unique())
+    n_rows = len(region.y.unique())
+    vals = region.mag.values
+    grid = vals.reshape((n_rows, n_cols))
+  except Exception as e:
+    logger.warn('e:', e)
+    import ipdb; ipdb.set_trace()
+
+  logger.info('grid.shape: %s' % str(grid.shape))
+  return grid
+
+def get_full_data(from_disk=True, truncate_before=None, truncate_after=None):
+  if from_disk and os.path.exists(AUGMENTED_DATA_PATH):
+    logger.info('reading %s...' % AUGMENTED_DATA_PATH)
+    try:
+      return pd.read_csv(AUGMENTED_DATA_PATH)
+    except:
+      logger.info('error, recreating...')
+
+  mag_df = read_magnetic_data()
+
+  df, cols_by_type, target_cols = prepare_data()
+  lat_col, lon_col = get_lat_lon_cols(df.columns)
+
+  if truncate_before or truncate_after:
+    df = df.truncate(before=truncate_before, after=truncate_after)
+
+  min_lat = min(mag_df.lat)
+  max_lat = max(mag_df.lat)
+  min_lon = min(mag_df.lon)
+  max_lon = max(mag_df.lon)
+
+  logger.debug('min_lat: %s' % min_lat)
+  logger.debug('max_lat: %s' % max_lat)
+  logger.debug('min_lon: %s' % min_lon)
+  logger.debug('max_lon: %s' % max_lon)
+
+  try:
+    logger.info('removing rows without lat/lon...')
+    df = df[pd.notnull(df[lat_col]) &
+            pd.notnull(df[lon_col])]
+    logger.info('removing out of bounds...')
+    df = df[(df[lat_col] >= min_lat) &
+            (df[lat_col] <= max_lat) &
+            (df[lon_col] >= min_lon) &
+            (df[lon_col] <= max_lon)]
+    logger.info('resetting index...')
+    df = df.reset_index()
+  except Exception as e:
+    logger.warn('e:', e)
+    import ipdb; ipdb.set_trace()
+
+  df['mag'] = None  # set dtype to Object
+  for i, row in df.iterrows():
+    logger.info('extracting magnetic region %d of %d' % (i, df.shape[0]))
+    try:
+      mag_region = get_mag_region(mag_df, row, lat_col, lon_col)
+      df.at[0, 'mag'] = mag_region
+    except Exception as e:
+      logger.warn('e:', e)
+      import ipdb; ipdb.set_trace()
+
+  logger.info('saving to %s' % AUGMENTED_DATA_PATH)
+  df.to_csv(AUGMENTED_DATA_PATH, encoding='utf-8')
+
+  return df
+
+def do_magnetic_regression():
+
+  df = get_full_data()
+  import ipdb; ipdb.set_trace()
+
+def main():
+  parser = argparse.ArgumentParser()
+  parser.add_argument(
+      '-s',
+      help='Do simple regression',
+      action='store_true')
+  parser.add_argument(
+      '-m',
+      help='Use magnetic data',
+      action='store_true')
+  args = parser.parse_args()
+
+  if args.s:
+    do_simple_regression()
+
+  if args.m:
+    do_magnetic_regression()
+
 
 if __name__ == '__main__':
   main()
