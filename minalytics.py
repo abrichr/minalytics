@@ -52,14 +52,18 @@ EXCEL_WORKBOOK_PATH = 'snlworkbook_Combined.xls'
 MAGNETIC_GRID_PATH = '200 m mag deg.dat'
 
 # Path to augmented data file
-AUGMENTED_DATA_PATH = 'augmented_data.csv'
+AUGMENTED_DATA_PATH = 'augmented_data.pkl'
+
+# Path to non-augmented data file
+DATA_PATH = 'data.pkl'
 
 # Set to True for verbose logging
 DEBUG = False
 
 
 import logging
-log_format = '%(asctime)s : %(name)s : %(levelname)s : %(message)s'
+#log_format = '%(asctime)s : %(name)s : %(levelname)s : %(message)s'
+log_format = '%(asctime)s : %(message)s'
 logging.basicConfig(format=log_format, level=logging.WARN)
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG if DEBUG else logging.INFO)
@@ -70,6 +74,7 @@ from matplotlib import cm
 from mpl_toolkits.mplot3d import Axes3D
 from pprint import pprint, pformat
 from sklearn import preprocessing, metrics, linear_model, model_selection
+from sklearn.pipeline import Pipeline
 from xlrd import open_workbook
 import argparse
 import cPickle as pickle
@@ -366,7 +371,22 @@ def remove_target_correlations(df, corr_thresh=CORR_THRESH):
   for col in cols_to_remove:
     del df[col]
 
-def prepare_data():
+def get_target_cols(cols_by_type):
+  target_cols = [col for col in cols_by_type[ColType.NUM]
+                 if any(word in col.lower() for word in TARGET_COL_TERMS)]
+  logger.info('target_cols:\n\t%s' % '\n\t'.join(target_cols))
+  return target_cols
+
+def get_data(from_disk=True):
+  if from_disk and os.path.exists(DATA_PATH):
+    logger.info('reading %s...' % DATA_PATH)
+    try:
+      f = open(DATA_PATH)
+      df, cols_by_type, target_cols = pickle.load(f)
+      return df, cols_by_type, target_cols
+    except Exception as e:
+      logger.info('e: %s' % e)
+      logger.info('recreating...')
 
   logger.info('Preparing data...')
   start_time = time.time()
@@ -378,9 +398,7 @@ def prepare_data():
 
   cols_by_type = parse_cols(df)
 
-  target_cols = [col for col in cols_by_type[ColType.NUM]
-                 if any(word in col.lower() for word in TARGET_COL_TERMS)]
-  logger.info('target_cols:\n\t%s' % '\n\t'.join(target_cols))
+  target_cols = get_target_cols(cols_by_type)
 
   logger.info('Converting multis...')
   convert_multi_to_onehot(df, cols_by_type)
@@ -396,16 +414,21 @@ def prepare_data():
 
   logger.info('Data preparation took: %.2fs' % (time.time() - start_time))
 
+  logger.info('saving to %s' % DATA_PATH)
+  f = open(DATA_PATH, 'w')
+  pickle.dump([df, cols_by_type, target_cols], f)
+
   return df, cols_by_type, target_cols
 
-def do_simple_regression():
-  df, cols_by_type, target_cols = prepare_data()
+from sklearn.svm import SVR
+from sklearn.ensemble import RandomForestRegressor
+regs = [
+    #SVR(kernel='rbf', C=1e3, gamma=0.1),  # slow and innaccurate
+    RandomForestRegressor()
+]
 
-  import ipdb; ipdb.set_trace()
-
-  rows, cols = df.shape
-  logger.info('rows: %s, cols: %s' % (rows, cols))
-
+def regress(df, target_cols, data_cols=None):
+  logger.info('regressing, df.shape: %s' % str(df.shape))
   for target_col in target_cols:
     logger.info('target_col: %s' % target_col)
     this_df = df[pd.notnull(df[target_col].values)]
@@ -414,21 +437,30 @@ def do_simple_regression():
     y = this_df[target_col].values
     for _target_col in target_cols:
         del this_df[_target_col]
+    if data_cols:
+      # TODO: delete cols not in data_cols
+      for col in this_df.columns:
+        if col not in data_cols:
+          del this_df[col]
     X = this_df.values
-    logger.debug('X.shape: %s, y.shape: %s' % ((X.shape, y.shape)))
+    logger.info('\tX.shape: %s, y.shape: %s' % ((X.shape, y.shape)))
 
-    logger.debug('Normalizing...')
-    X_norm = preprocessing.normalize(X)
+    for reg in regs:
+      logger.info('\tFitting reg: %s...' % reg.__class__.__name__)
+      scaler = preprocessing.StandardScaler()
+      pipeline = Pipeline([('transformer', scaler), ('estimator', reg)])
+      cv = model_selection.KFold(n_splits=5)
+      scores = model_selection.cross_val_score(pipeline, X, y, cv=cv)
+      score, std = scores.mean(), scores.std()
+      logger.info('\t\tR2: %.4f, std: %.4f' % (score, std))
 
-    cv = model_selection.KFold(n_splits=5)
+def do_simple_regression():
+  df, cols_by_type, target_cols = get_data()
 
-    reg = linear_model.LinearRegression()
-    logger.debug('Fitting...')
+  rows, cols = df.shape
+  logger.info('rows: %s, cols: %s' % (rows, cols))
 
-    scores = model_selection.cross_val_score(reg, X, y, cv=cv)
-    score, std = scores.mean(), scores.std()
-    logger.info('R2: %.4f, std: %.4f' % (score, std))
-
+  regress(df, target_cols)
 
 def read_magnetic_data(
     magnetic_grid_path=MAGNETIC_GRID_PATH
@@ -473,7 +505,7 @@ def get_lat_lon_cols(cols):
   logger.info('lon_cols: %s' % lon_cols)
   return lat_cols[0], lon_cols[0]
 
-def get_mag_region(df, row, lat_col, lon_col, box_size_m=2000):
+def get_mag_region(df, row, lat_col, lon_col, box_size_m=10000):
   try:
     d_lat = abs(df.lat - row[lat_col])
     d_lon = abs(df.lon - row[lon_col])
@@ -498,21 +530,21 @@ def get_mag_region(df, row, lat_col, lon_col, box_size_m=2000):
   logger.info('grid.shape: %s' % str(grid.shape))
   return grid
 
-def get_full_data(from_disk=True, truncate_before=None, truncate_after=None):
+def get_full_data(from_disk=True, max_rows=None):
   if from_disk and os.path.exists(AUGMENTED_DATA_PATH):
     logger.info('reading %s...' % AUGMENTED_DATA_PATH)
     try:
-      return pd.read_csv(AUGMENTED_DATA_PATH)
-    except:
-      logger.info('error, recreating...')
+      f = open(AUGMENTED_DATA_PATH)
+      grids, df, cols_by_type, target_cols = pickle.load(f)
+      return grids, df, cols_by_type, target_cols
+    except Exception as e:
+      logger.info('e: %s' % e)
+      logger.info('recreating...')
 
   mag_df = read_magnetic_data()
 
-  df, cols_by_type, target_cols = prepare_data()
+  df, cols_by_type, target_cols = get_data()
   lat_col, lon_col = get_lat_lon_cols(df.columns)
-
-  if truncate_before or truncate_after:
-    df = df.truncate(before=truncate_before, after=truncate_after)
 
   min_lat = min(mag_df.lat)
   max_lat = max(mag_df.lat)
@@ -539,25 +571,60 @@ def get_full_data(from_disk=True, truncate_before=None, truncate_after=None):
     logger.warn('e:', e)
     import ipdb; ipdb.set_trace()
 
-  df['mag'] = None  # set dtype to Object
+  #df['mag'] = None  # set dtype to Object
+  grids = []
   for i, row in df.iterrows():
+    if max_rows and i > max_rows:
+      break
     logger.info('extracting magnetic region %d of %d' % (i, df.shape[0]))
     try:
       mag_region = get_mag_region(mag_df, row, lat_col, lon_col)
-      df.at[0, 'mag'] = mag_region
+      #df.at[0, 'mag'] = mag_region
+      grids.append(mag_region)
     except Exception as e:
       logger.warn('e:', e)
       import ipdb; ipdb.set_trace()
 
   logger.info('saving to %s' % AUGMENTED_DATA_PATH)
-  df.to_csv(AUGMENTED_DATA_PATH, encoding='utf-8')
+  f = open(AUGMENTED_DATA_PATH, 'w')
+  pickle.dump([grids, df, cols_by_type, target_cols], f)
+  #df.to_csv(AUGMENTED_DATA_PATH, encoding='utf-8')
 
-  return df
+  return grids, df, cols_by_type, target_cols
+
+def add_magnetic_features(df, grids):
+  df['mag_min'] = [grid.min() for grid in grids]
+  df['mag_max'] = [grid.max() for grid in grids]
+  df['mag_std'] = [grid.std() for grid in grids]
+  # http://www.cspg.org/cspg/documents/Conventions/Archives/Annual/2011/176-Texture_Analysis.pdf
+  # https://www.sciencedirect.com/science/article/pii/S2090997717300937
 
 def do_magnetic_regression():
+  grids, df, cols_by_type, target_cols = get_full_data(from_disk=True)
+  add_magnetic_features(df, grids)
+  regress(df, target_cols, 'mag_min mag_max mag_std'.split())
 
-  df = get_full_data()
-  import ipdb; ipdb.set_trace()
+'''
+simple:
+
+2018-03-02 17:58:24,548 : R2: 0.5309, std: 0.1680
+2018-03-02 17:58:24,548 : target_col: Operator Total Enterprise Value (Reported)
+2018-03-02 17:58:27,616 : R2: 0.5953, std: 0.0862
+2018-03-02 17:58:27,616 : target_col: Operator Total Debt/ Total Capitalization (%)
+2018-03-02 17:58:30,240 : R2: 0.1377, std: 0.0568
+2018-03-02 17:58:30,241 : target_col: Operator Total Capitalization, at Book Value (Reported)
+2018-03-02 17:58:33,066 : R2: 0.6911, std: 0.0860
+2018-03-02 17:58:33,066 : target_col: Owner Market Capitalization Owner 1 (Reported)
+2018-03-02 17:58:36,387 : R2: 0.5364, std: 0.1404
+2018-03-02 17:58:36,387 : target_col: Owner Total Enterprise Value Owner 1 (Reported)
+2018-03-02 17:58:39,606 : R2: 0.5994, std: 0.0686
+2018-03-02 17:58:39,606 : target_col: Owner Total Debt/ Total Capitalization Owner 1 (%)
+2018-03-02 17:58:42,344 : R2: 0.1927, std: 0.0499
+2018-03-02 17:58:42,344 : target_col: Owner Total Capitalization, at Book Value Owner 1 (Reported)
+2018-03-02 17:58:45,053 : R2: 0.6771, std: 0.0939
+2018-03-02 17:58:45,053 : target_col: Total Deal Value (Announcement) Deal 1 (Reported)
+2018-03-02 17:58:48,211 : R2: 0.7815, std: 0.0160
+'''
 
 def main():
   parser = argparse.ArgumentParser()
