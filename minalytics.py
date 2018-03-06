@@ -57,6 +57,12 @@ AUGMENTED_DATA_PATH = 'augmented_data.pkl'
 # Path to non-augmented data file
 DATA_PATH = 'data.pkl'
 
+# Size of patch of magnetic data in metres
+MAG_PATCH_SIZE_M = 10000
+
+# Size of magnetic data stride in metres
+MAG_STRIDE_SIZE_M = 5000
+
 # Set to True for verbose logging
 DEBUG = False
 
@@ -438,7 +444,6 @@ def regress(df, target_cols, data_cols=None):
     for _target_col in target_cols:
         del this_df[_target_col]
     if data_cols:
-      # TODO: delete cols not in data_cols
       for col in this_df.columns:
         if col not in data_cols:
           del this_df[col]
@@ -505,26 +510,48 @@ def get_lat_lon_cols(cols):
   logger.info('lon_cols: %s' % lon_cols)
   return lat_cols[0], lon_cols[0]
 
-def get_mag_region(df, row, lat_col, lon_col, box_size_m=10000):
+def time_func(func, name):
+  start_time = time.time()
+  rval = func()
+  duration = time.time() - start_time
+  logger.debug('func: %s, duration: %.2f' % (name, duration))
+  return rval
+
+def extract_grid(mag_df, cx, cy, box_size_m=MAG_PATCH_SIZE_M):
+  half_size = box_size_m / 2.0
+  x_mask = time_func(lambda: abs(mag_df.x - cx) < half_size,
+      'abs(mag_df.x - cx) < half_size')
+  y_mask = time_func(lambda: abs(mag_df.y - cy) < half_size,
+      'abs(mag_df.y - cy) < half_size')
+  mask = time_func(lambda: x_mask & y_mask,
+      'x_mask & y_mask')
+  region = time_func(lambda: mag_df[mask],
+      'mag_df[mask]')
+  n_cols = time_func(lambda: len(region.x.unique()),
+      'len(region.x.unique())')
+  n_rows = time_func(lambda: len(region.y.unique()),
+      'len(region.y.unique())')
+  grid = time_func(lambda: region.mag.values.reshape((n_rows, n_cols)),
+      'region.mag.values.reshape((n_rows, n_cols))')
+
+  # TOOD: remove
+  #grid2 = region.pivot(index='x', columns='y', values='mag').values
+  #assert np.allclose(grid, grid2)
+
+  return grid
+
+def get_mag_region(mag_df, row, lat_col, lon_col, box_size_m=MAG_PATCH_SIZE_M):
   try:
-    d_lat = abs(df.lat - row[lat_col])
-    d_lon = abs(df.lon - row[lon_col])
+    d_lat = abs(mag_df.lat - row[lat_col])
+    d_lon = abs(mag_df.lon - row[lon_col])
     d_tot = d_lat + d_lon
     argmin = d_tot.idxmin()
-    row = df.loc[argmin]
+    row = mag_df.loc[argmin]
     cx = row.x
     cy = row.y
-    half_size = box_size_m / 2.0
-    x_mask = abs(df.x - cx) < half_size 
-    y_mask = abs(df.y - cy) < half_size 
-    mask = x_mask & y_mask
-    region = df[mask]
-    n_cols = len(region.x.unique())
-    n_rows = len(region.y.unique())
-    vals = region.mag.values
-    grid = vals.reshape((n_rows, n_cols))
+    grid = extract_grid(mag_df, cx, cy)
   except Exception as e:
-    logger.warn('e:', e)
+    logger.warn('e: %s' % e)
     import ipdb; ipdb.set_trace()
 
   logger.info('grid.shape: %s' % str(grid.shape))
@@ -596,35 +623,95 @@ def add_magnetic_features(df, grids):
   df['mag_min'] = [grid.min() for grid in grids]
   df['mag_max'] = [grid.max() for grid in grids]
   df['mag_std'] = [grid.std() for grid in grids]
+
   # http://www.cspg.org/cspg/documents/Conventions/Archives/Annual/2011/176-Texture_Analysis.pdf
   # https://www.sciencedirect.com/science/article/pii/S2090997717300937
+  # https://prism.ucalgary.ca/bitstream/handle/1880/51900/texture%20tutorial%20v%203_0%20180206.pdf?sequence=11&isAllowed=y
+
+  # https://www.orfeo-toolbox.org/features-2/
+
+  from skimage.feature import greycomatrix, greycoprops
+  from skimage.measure import shannon_entropy
+  from sklearn.decomposition import PCA
+  feats = {name: [] for name in [
+    'correlation',
+    'variance',
+    'contrast',
+    'entropy',
+    'homogeneity',
+    'asm',
+    #'pca'
+  ]}
+  #mn = min(g.min() for g in grids)
+  #mx = max(g.max() for g in grids)
+  for grid in grids:
+    print('grid.shape: %s' % str(grid.shape))
+    mn = grid.min()
+    mx = grid.max()
+    grid = ((grid - mn) / (mx - mn) * 256).astype('uint8')
+    glcm = greycomatrix(grid, [5], [0], symmetric=True, normed=True)
+    correlation = greycoprops(glcm, 'correlation')[0][0]
+    variance = grid.var()
+    contrast = greycoprops(glcm, 'contrast')[0][0]
+    entropy = shannon_entropy(grid)
+    homogeneity = greycoprops(glcm, 'homogeneity')[0][0]
+    asm = greycoprops(glcm, 'ASM')[0][0]
+    # TODO: take components which explain 85% variance 
+    #pca = PCA().fit_transform(grid)
+
+    #import ipdb; ipdb.set_trace()
+
+    feats['correlation'].append(correlation)
+    feats['variance'].append(variance)
+    feats['contrast'].append(contrast)
+    feats['entropy'].append(entropy)
+    feats['homogeneity'].append(homogeneity)
+    feats['asm'].append(asm)
+    #feats['pca'].append(pca)
+
+  for name, vals in feats.iteritems():
+    logger.info('name: %s val: %s' % (name, vals[0]))
+    df[name] = vals
+  #import ipdb; ipdb.set_trace()
+
+  return feats.keys() + ['mag_min', 'mag_max', 'mag_std']
 
 def do_magnetic_regression():
-  grids, df, cols_by_type, target_cols = get_full_data(from_disk=True)
-  add_magnetic_features(df, grids)
-  regress(df, target_cols, 'mag_min mag_max mag_std'.split())
+  grids, df, cols_by_type, target_cols = get_full_data(from_disk=False)
+  mag_feat_names = add_magnetic_features(df, grids)
+  regress(df, target_cols, mag_feat_names)
 
-'''
-simple:
 
-2018-03-02 17:58:24,548 : R2: 0.5309, std: 0.1680
-2018-03-02 17:58:24,548 : target_col: Operator Total Enterprise Value (Reported)
-2018-03-02 17:58:27,616 : R2: 0.5953, std: 0.0862
-2018-03-02 17:58:27,616 : target_col: Operator Total Debt/ Total Capitalization (%)
-2018-03-02 17:58:30,240 : R2: 0.1377, std: 0.0568
-2018-03-02 17:58:30,241 : target_col: Operator Total Capitalization, at Book Value (Reported)
-2018-03-02 17:58:33,066 : R2: 0.6911, std: 0.0860
-2018-03-02 17:58:33,066 : target_col: Owner Market Capitalization Owner 1 (Reported)
-2018-03-02 17:58:36,387 : R2: 0.5364, std: 0.1404
-2018-03-02 17:58:36,387 : target_col: Owner Total Enterprise Value Owner 1 (Reported)
-2018-03-02 17:58:39,606 : R2: 0.5994, std: 0.0686
-2018-03-02 17:58:39,606 : target_col: Owner Total Debt/ Total Capitalization Owner 1 (%)
-2018-03-02 17:58:42,344 : R2: 0.1927, std: 0.0499
-2018-03-02 17:58:42,344 : target_col: Owner Total Capitalization, at Book Value Owner 1 (Reported)
-2018-03-02 17:58:45,053 : R2: 0.6771, std: 0.0939
-2018-03-02 17:58:45,053 : target_col: Total Deal Value (Announcement) Deal 1 (Reported)
-2018-03-02 17:58:48,211 : R2: 0.7815, std: 0.0160
-'''
+def do_unsupervised_learning():
+  mag_df = read_magnetic_data()
+
+  min_y = min(mag_df.y)
+  max_y = max(mag_df.y)
+  min_x = min(mag_df.x)
+  max_x = max(mag_df.x)
+
+  # loop over top left corners
+  X = []
+  half_patch_size = MAG_PATCH_SIZE_M / 2
+  x_range = range(min_x, max_x - MAG_PATCH_SIZE_M, MAG_STRIDE_SIZE_M)
+  y_range = range(min_y, max_y - MAG_PATCH_SIZE_M, MAG_STRIDE_SIZE_M)
+  nx = len(x_range)
+  ny = len(y_range)
+  n_total = nx * ny
+  n = 0.0
+  for ix, x in enumerate(x_range):
+    for iy, y in enumerate(y_range):
+      cx = x + half_patch_size
+      cy = y + half_patch_size
+      grid = extract_grid(mag_df, cx, cy)
+      pct = n / n_total * 100
+      logger.info('%d of %d, %d of %d: %s (%.4f%%)' % (ix, nx, iy, ny, str(grid.shape), pct))
+      X.append(grid)
+      n += 1.0
+
+  logger.info("X.shape: %s" % str(np.array(X).shape))
+
+  import ipdb; ipdb.set_trace()
 
 def main():
   parser = argparse.ArgumentParser()
@@ -636,6 +723,10 @@ def main():
       '-m',
       help='Use magnetic data',
       action='store_true')
+  parser.add_argument(
+      '-u',
+      help='Unsupervised feature learning',
+      action='store_true')
   args = parser.parse_args()
 
   if args.s:
@@ -643,6 +734,9 @@ def main():
 
   if args.m:
     do_magnetic_regression()
+
+  if args.u:
+    do_unsupervised_learning()
 
 
 if __name__ == '__main__':
