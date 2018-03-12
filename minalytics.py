@@ -63,8 +63,11 @@ MAG_PATCH_SIZE_M = 10000
 # Size of magnetic data stride in metres
 MAG_STRIDE_SIZE_M = 5000
 
+# Number of PCA components to use as features
+NUM_PCA_COMPONENTS = 10
+
 # Set to True for verbose logging
-DEBUG = False
+DEBUG = True
 
 
 import logging
@@ -76,10 +79,14 @@ logger.setLevel(logging.DEBUG if DEBUG else logging.INFO)
 
 from cachier import cachier
 from collections import Counter
+from functools import partial
 from matplotlib import cm
 from mpl_toolkits.mplot3d import Axes3D
 from pprint import pprint, pformat
 from sklearn import preprocessing, metrics, linear_model, model_selection
+from sklearn.decomposition import PCA, KernelPCA
+from skimage.feature import greycomatrix, greycoprops
+from skimage.measure import shannon_entropy
 from sklearn.pipeline import Pipeline
 from xlrd import open_workbook
 import argparse
@@ -434,7 +441,8 @@ regs = [
 ]
 
 def regress(df, target_cols, data_cols=None):
-  logger.info('regressing, df.shape: %s' % str(df.shape))
+  logger.info('regressing, df.shape: %s, target_cols:\n%s, data_cols:\n%s' % (
+    str(df.shape), pformat(sorted(target_cols)), pformat(sorted(data_cols))))
   for target_col in target_cols:
     logger.info('target_col: %s' % target_col)
     this_df = df[pd.notnull(df[target_col].values)]
@@ -510,15 +518,25 @@ def get_lat_lon_cols(cols):
   logger.info('lon_cols: %s' % lon_cols)
   return lat_cols[0], lon_cols[0]
 
-def time_func(func, name):
+def time_func(func, name, verbose=False):
+  print_func = logger.info if verbose else logger.debug
   start_time = time.time()
+  print_func('timing func: %s...' % name)
   rval = func()
   duration = time.time() - start_time
-  logger.debug('func: %s, duration: %.2f' % (name, duration))
+  print_func('func: %s, duration: %.2f' % (name, duration))
   return rval
 
 def extract_grid(mag_df, cx, cy, box_size_m=MAG_PATCH_SIZE_M):
   half_size = box_size_m / 2.0
+
+  x0 = int(cx - half_size)
+  x1 = int(cx + half_size)
+  y0 = int(cy - half_size)
+  y1 = int(cy + half_size)
+
+  #mag_df.loc[(x0,y0):(x1,y1)]
+
   x_mask = time_func(lambda: abs(mag_df.x - cx) < half_size,
       'abs(mag_df.x - cx) < half_size')
   y_mask = time_func(lambda: abs(mag_df.y - cy) < half_size,
@@ -540,7 +558,7 @@ def extract_grid(mag_df, cx, cy, box_size_m=MAG_PATCH_SIZE_M):
 
   return grid
 
-def get_mag_region(mag_df, row, lat_col, lon_col, box_size_m=MAG_PATCH_SIZE_M):
+def get_mag_region(mag_df, pivot, row, lat_col, lon_col, box_size_m=MAG_PATCH_SIZE_M):
   try:
     d_lat = abs(mag_df.lat - row[lat_col])
     d_lon = abs(mag_df.lon - row[lon_col])
@@ -549,7 +567,8 @@ def get_mag_region(mag_df, row, lat_col, lon_col, box_size_m=MAG_PATCH_SIZE_M):
     row = mag_df.loc[argmin]
     cx = row.x
     cy = row.y
-    grid = extract_grid(mag_df, cx, cy)
+    #grid = extract_grid(mag_df, cx, cy)
+    grid = extract_grid_from_pivot(pivot, cx, cy)
   except Exception as e:
     logger.warn('e: %s' % e)
     import ipdb; ipdb.set_trace()
@@ -600,12 +619,13 @@ def get_full_data(from_disk=True, max_rows=None):
 
   #df['mag'] = None  # set dtype to Object
   grids = []
+  pivot = mag_df.pivot(index='x', columns='y', values='mag')
   for i, row in df.iterrows():
     if max_rows and i > max_rows:
       break
     logger.info('extracting magnetic region %d of %d' % (i, df.shape[0]))
     try:
-      mag_region = get_mag_region(mag_df, row, lat_col, lon_col)
+      mag_region = get_mag_region(mag_df, pivot, row, lat_col, lon_col)
       #df.at[0, 'mag'] = mag_region
       grids.append(mag_region)
     except Exception as e:
@@ -619,35 +639,33 @@ def get_full_data(from_disk=True, max_rows=None):
 
   return grids, df, cols_by_type, target_cols
 
-def add_magnetic_features(df, grids):
-  df['mag_min'] = [grid.min() for grid in grids]
-  df['mag_max'] = [grid.max() for grid in grids]
-  df['mag_std'] = [grid.std() for grid in grids]
-
-  # http://www.cspg.org/cspg/documents/Conventions/Archives/Annual/2011/176-Texture_Analysis.pdf
-  # https://www.sciencedirect.com/science/article/pii/S2090997717300937
-  # https://prism.ucalgary.ca/bitstream/handle/1880/51900/texture%20tutorial%20v%203_0%20180206.pdf?sequence=11&isAllowed=y
-
-  # https://www.orfeo-toolbox.org/features-2/
-
-  from skimage.feature import greycomatrix, greycoprops
-  from skimage.measure import shannon_entropy
-  from sklearn.decomposition import PCA
+def add_magnetic_features(df, grids, num_pca_components=NUM_PCA_COMPONENTS):
   feats = {name: [] for name in [
+    'min',
+    'max',
+    'std',
+    'sum',
+
+    # http://www.cspg.org/cspg/documents/Conventions/Archives/Annual/2011/176-Texture_Analysis.pdf
+    # https://www.sciencedirect.com/science/article/pii/S2090997717300937
+    # https://prism.ucalgary.ca/bitstream/handle/1880/51900/texture%20tutorial%20v%203_0%20180206.pdf?sequence=11&isAllowed=y
+    # https://www.orfeo-toolbox.org/features-2/
     'correlation',
     'variance',
     'contrast',
     'entropy',
     'homogeneity',
     'asm',
-    #'pca'
   ]}
-  #mn = min(g.min() for g in grids)
-  #mx = max(g.max() for g in grids)
+  for i in range(num_pca_components):
+    feats['pca_%d' % i] = []
+
+  pca = get_magnetic_pca()
   for grid in grids:
-    print('grid.shape: %s' % str(grid.shape))
+    logger.debug('grid.shape: %s' % str(grid.shape))
     mn = grid.min()
     mx = grid.max()
+    std = grid.std()
     grid = ((grid - mn) / (mx - mn) * 256).astype('uint8')
     glcm = greycomatrix(grid, [5], [0], symmetric=True, normed=True)
     correlation = greycoprops(glcm, 'correlation')[0][0]
@@ -656,34 +674,51 @@ def add_magnetic_features(df, grids):
     entropy = shannon_entropy(grid)
     homogeneity = greycoprops(glcm, 'homogeneity')[0][0]
     asm = greycoprops(glcm, 'ASM')[0][0]
-    # TODO: take components which explain 85% variance 
-    #pca = PCA().fit_transform(grid)
+    _sum = grid.sum()
 
-    #import ipdb; ipdb.set_trace()
+    try:
+      grid_t = pca.transform([grid.flatten()])[0]
+      for i in range(num_pca_components):
+        feats['pca_%d' % i].append(grid_t[i])
+    except ValueError as e:
+      for i in range(num_pca_components):
+        feats['pca_%d' % i].append(0)
 
+    feats['min'].append(mn)
+    feats['max'].append(mx)
+    feats['std'].append(std)
     feats['correlation'].append(correlation)
     feats['variance'].append(variance)
     feats['contrast'].append(contrast)
     feats['entropy'].append(entropy)
     feats['homogeneity'].append(homogeneity)
     feats['asm'].append(asm)
-    #feats['pca'].append(pca)
+    feats['sum'].append(_sum)
 
   for name, vals in feats.iteritems():
     logger.info('name: %s val: %s' % (name, vals[0]))
     df[name] = vals
-  #import ipdb; ipdb.set_trace()
 
-  return feats.keys() + ['mag_min', 'mag_max', 'mag_std']
+  # return ['mn', 'mx', 'std', 'sum']
+  return feats.keys()
 
 def do_magnetic_regression():
-  grids, df, cols_by_type, target_cols = get_full_data(from_disk=False)
+  grids, df, cols_by_type, target_cols = get_full_data(from_disk=True)
   mag_feat_names = add_magnetic_features(df, grids)
   regress(df, target_cols, mag_feat_names)
 
+def extract_grid_from_pivot(pivot, cx, cy, box_size_m=MAG_PATCH_SIZE_M):
+  half_size = box_size_m / 2.0
+  x0 = int(cx - half_size)
+  x1 = int(cx + half_size)
+  y0 = int(cy - half_size)
+  y1 = int(cy + half_size)
+  grid = pivot.loc[x0:x1,y0:y1].values
+  return grid
 
-def do_unsupervised_learning():
+def extract_all_grids():
   mag_df = read_magnetic_data()
+  pivot = mag_df.pivot(index='x', columns='y', values='mag')
 
   min_y = min(mag_df.y)
   max_y = max(mag_df.y)
@@ -698,19 +733,43 @@ def do_unsupervised_learning():
   nx = len(x_range)
   ny = len(y_range)
   n_total = nx * ny
-  n = 0.0
+  n = 0
+  logger.info('Extracting grids...')
   for ix, x in enumerate(x_range):
     for iy, y in enumerate(y_range):
       cx = x + half_patch_size
       cy = y + half_patch_size
-      grid = extract_grid(mag_df, cx, cy)
-      pct = n / n_total * 100
-      logger.info('%d of %d, %d of %d: %s (%.4f%%)' % (ix, nx, iy, ny, str(grid.shape), pct))
+      grid = extract_grid_from_pivot(pivot, cx, cy).flatten()
+      pct = 1.0 * n / n_total * 100
+      if n % 1000 == 0:
+        logger.debug('x: %d of %d, y: %d of %d, shape: %s, %d%% complete' % (
+          ix, nx, iy, ny, str(grid.shape), int(pct)))
       X.append(grid)
-      n += 1.0
+      n += 1
+  X = np.array(X)
+  logger.info("X.shape: %s" % str(X.shape))
 
-  logger.info("X.shape: %s" % str(np.array(X).shape))
+  return X
 
+def get_magnetic_pca(fname='magpca.pickle'):
+  try:
+    with open(fname, 'r') as f:
+      logger.info('Loading %s...' % fname)
+      pca = pickle.load(f)
+  except:
+    logger.info('Error while loading %s, recalculating...' % fname)
+    X = extract_all_grids()
+    pca = PCA()  # KernelPCA()
+    time_func(partial(pca.fit, X), 'PCA.fit()', verbose=True)
+    logger.info('Dumping to %s...' % fname)
+    with open(fname, 'w') as f:
+      pickle.dump(pca, f)
+    logger.info('Done.')
+
+  return pca
+
+def do_pca():
+  pca = get_magnetic_pca()
   import ipdb; ipdb.set_trace()
 
 def main():
@@ -724,8 +783,8 @@ def main():
       help='Use magnetic data',
       action='store_true')
   parser.add_argument(
-      '-u',
-      help='Unsupervised feature learning',
+      '-p',
+      help='Train PCA and save to disk',
       action='store_true')
   args = parser.parse_args()
 
@@ -735,8 +794,8 @@ def main():
   if args.m:
     do_magnetic_regression()
 
-  if args.u:
-    do_unsupervised_learning()
+  if args.p:
+    do_pca()
 
 
 if __name__ == '__main__':
