@@ -619,7 +619,7 @@ def get_full_data(from_disk=True, max_rows=None):
 
   #df['mag'] = None  # set dtype to Object
   grids = []
-  pivot = mag_df.pivot(index='x', columns='y', values='mag')
+  pivot = get_pivot(mag_df)
   for i, row in df.iterrows():
     if max_rows and i > max_rows:
       break
@@ -659,8 +659,11 @@ def add_magnetic_features(df, grids, num_pca_components=NUM_PCA_COMPONENTS):
   ]}
   for i in range(num_pca_components):
     feats['pca_%d' % i] = []
+    feats['kpca_%d' % i] = []
 
   pca = get_magnetic_pca()
+  kpca = get_magnetic_kpca()
+
   for grid in grids:
     logger.debug('grid.shape: %s' % str(grid.shape))
     mn = grid.min()
@@ -677,12 +680,15 @@ def add_magnetic_features(df, grids, num_pca_components=NUM_PCA_COMPONENTS):
     _sum = grid.sum()
 
     try:
-      grid_t = pca.transform([grid.flatten()])[0]
+      grid_pca = pca.transform([grid.flatten()])[0]
+      grid_kpca = kpca.transform([grid.flatten()])[0]
       for i in range(num_pca_components):
-        feats['pca_%d' % i].append(grid_t[i])
+        feats['pca_%d' % i].append(grid_pca[i])
+        feats['kpca_%d' % i].append(grid_kpca[i])
     except ValueError as e:
       for i in range(num_pca_components):
         feats['pca_%d' % i].append(0)
+        feats['kpca_%d' % i].append(0)
 
     feats['min'].append(mn)
     feats['max'].append(mx)
@@ -707,6 +713,80 @@ def do_magnetic_regression():
   mag_feat_names = add_magnetic_features(df, grids)
   regress(df, target_cols, mag_feat_names)
 
+def get_pivot(mag_df):
+  pivot = mag_df.pivot(index='x', columns='y', values='mag')
+  grid = pivot.values
+  vals = grid.flatten()
+  vals.sort()
+  idxs = [i for i, v in enumerate(vals) if v != vals[0]]
+  min_idx = idxs[0]
+  clip_min = vals[min_idx]
+  pivot = pivot.clip(clip_min)
+  return pivot
+
+def display_full_magnetic_grid(save=True, show=False):
+  if not (save or show):
+    return
+
+  mag_df = read_magnetic_data()
+  pivot = get_pivot(mag_df)
+  grid = pivot.values
+
+  mn = grid.min()
+  mx = grid.max()
+
+  logger.info('mn: %s, mx: %s' % (mn, mx))
+  logger.info('grid.shape: %s' % str(grid.shape))
+
+  plt.imshow(grid)
+
+  if save:
+    filename = 'grid.png'
+    logger.info('Saving to file %s' % filename)
+    plt.savefig(filename, dpi=min(grid.shape))
+  if show:
+    plt.show()
+
+  import ipdb; ipdb.set_trace()
+
+
+def display_magnetic_grids(save=True, show=False):
+  if not (save or show):
+    return
+
+  grids, df, cols_by_type, target_cols = get_full_data(from_disk=True)
+  lat_col, lon_col = get_lat_lon_cols(df.columns)
+
+  mn = min([grid.min() for grid in grids])
+  mx = max([grid.max() for grid in grids])
+  logger.info('mn: %.2f, mx: %.2f' % (mn, mx))
+
+  for i, grid in enumerate(grids):
+    grid_min = grid.min()
+    grid_max = grid.max()
+    logger.info('grid_min: %s, grid_max: %s' % (grid_min, grid_max))
+    row = df.iloc[i]
+    lat = row[lat_col]
+    lon = row[lon_col]
+
+    ax = plt.subplot(1,2,1)
+    plt.imshow(grid)
+    ax.set_title('Relative [%.2f, %.2f]' % (grid_min, grid_max))
+
+    ax = plt.subplot(1,2,2)
+    plt.imshow(grid, vmin=mn, vmax=mx)
+    ax.set_title('Absolute [%.2f, %.2f]' % (mn, mx))
+
+    plt.suptitle('Magnetic Intensities at lat: %s, lon: %s' % (lat, lon))
+
+    if save:
+      filename = 'grid_%04d_%s_%s.png' % (i, lat, lon)
+      logger.info("Saving to file %s" % filename)
+      plt.savefig(filename)
+    if show:
+      plt.show()
+
+
 def extract_grid_from_pivot(pivot, cx, cy, box_size_m=MAG_PATCH_SIZE_M):
   half_size = box_size_m / 2.0
   x0 = int(cx - half_size)
@@ -718,7 +798,7 @@ def extract_grid_from_pivot(pivot, cx, cy, box_size_m=MAG_PATCH_SIZE_M):
 
 def extract_all_grids():
   mag_df = read_magnetic_data()
-  pivot = mag_df.pivot(index='x', columns='y', values='mag')
+  pivot = get_pivot(mag_df)
 
   min_y = min(mag_df.y)
   max_y = max(mag_df.y)
@@ -739,28 +819,48 @@ def extract_all_grids():
     for iy, y in enumerate(y_range):
       cx = x + half_patch_size
       cy = y + half_patch_size
-      grid = extract_grid_from_pivot(pivot, cx, cy).flatten()
+      grid = extract_grid_from_pivot(pivot, cx, cy)
       pct = 1.0 * n / n_total * 100
       if n % 1000 == 0:
         logger.debug('x: %d of %d, y: %d of %d, shape: %s, %d%% complete' % (
           ix, nx, iy, ny, str(grid.shape), int(pct)))
-      X.append(grid)
+      X.append(grid.flatten())
       n += 1
   X = np.array(X)
   logger.info("X.shape: %s" % str(X.shape))
 
   return X
 
-def get_magnetic_pca(fname='magpca.pickle'):
+def _do_mag_pca(Klass, fname, pct_rows=None):
   try:
     with open(fname, 'r') as f:
       logger.info('Loading %s...' % fname)
       pca = pickle.load(f)
   except:
-    logger.info('Error while loading %s, recalculating...' % fname)
+    logger.info('Unable to load %s, recalculating...' % fname)
     X = extract_all_grids()
-    pca = PCA()  # KernelPCA()
+
+    # Standardize
+    mean = X.mean(axis=0)
+    X -= mean
+    std = X.std(axis=0)
+    X /= std
+
+    pca = Klass()  # PCA() or KernelPCA()
+
+    if pct_rows is not None:
+      n_rows = int(X.shape[0] * pct_rows)
+      logger.debug('pct_rows: %s, n_rows: %s' % (pct_rows, n_rows))
+      row_idxs = np.random.choice(range(X.shape[0]), size=(n_rows,))
+      X_ = []
+      for i in row_idxs:
+        X_.append(X[i,:])
+      X = np.array(X_)
+      logger.debug('new X.shape: %s' % str(X.shape))
+
+    # TODO: change name of func depending on Klass
     time_func(partial(pca.fit, X), 'PCA.fit()', verbose=True)
+
     logger.info('Dumping to %s...' % fname)
     with open(fname, 'w') as f:
       pickle.dump(pca, f)
@@ -768,8 +868,41 @@ def get_magnetic_pca(fname='magpca.pickle'):
 
   return pca
 
+def get_magnetic_kpca(fname='magkpca.pkl'):
+  return _do_mag_pca(partial(KernelPCA, kernel='rbf'), fname, pct_rows=0.1)
+  
+def get_magnetic_pca(fname='magpca.pkl'):
+  return _do_mag_pca(PCA, fname)
+
+def _display_pca(pca, name, save=True, show=False, n_components=10):
+  # show/save first N principal components
+  for i, component in enumerate(pca.components_):
+    if i > n_components:
+      break
+    grid_size = int(np.sqrt(component.shape[0]))
+    grid = np.resize(component, (grid_size, grid_size))
+    plt.imshow(grid)
+
+    exp_var_ratio = pca.explained_variance_ratio_[i]
+    plt.title('%dth principal component\nexplains %.2f variance' % (
+      i, exp_var_ratio))
+
+    if show:
+      plt.show()
+    if save:
+      filename = '%s_%d.png' % (name, i)
+      logger.info('Saving to %s...' % filename)
+      plt.savefig(filename, dpi=min(grid.shape))
+  import ipdb; ipdb.set_trace()
+
 def do_pca():
   pca = get_magnetic_pca()
+  _display_pca(pca, 'pca')
+  import ipdb; ipdb.set_trace()
+
+def do_kpca():
+  kpca = get_magnetic_kpca()
+  # TODO: fix this:
   import ipdb; ipdb.set_trace()
 
 def main():
@@ -786,6 +919,19 @@ def main():
       '-p',
       help='Train PCA and save to disk',
       action='store_true')
+  parser.add_argument(
+      '-k',
+      help='Train KernelPCA and save to disk',
+      action='store_true')
+  parser.add_argument(
+      '-d',
+      help='Display magnetic grids',
+      action='store_true')
+  parser.add_argument(
+      '-f',
+      help='Display full magnetic grid',
+      action='store_true')
+
   args = parser.parse_args()
 
   if args.s:
@@ -797,6 +943,14 @@ def main():
   if args.p:
     do_pca()
 
+  if args.k:
+    do_kpca()
+
+  if args.d:
+    display_magnetic_grids()
+
+  if args.f:
+    display_full_magnetic_grid()
 
 if __name__ == '__main__':
   main()
