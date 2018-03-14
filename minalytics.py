@@ -11,10 +11,10 @@ It performs the following tasks:
     Multi-categorical)
   - Convert Categorical and Multi-Categorical to One-Hot representations
   - Regress one target column at a time (ignoring other targets) via linear
-    regression
-    with k-fold cross-validation
+    regression with k-fold cross-validation
   - Print Pearson's Correlation Coefficient and the standard deviation across
     folds for each target
+  - TODO: And lots more...
 
 TODO:
   model:
@@ -22,8 +22,6 @@ TODO:
     - regression using blob features
     - autoencoder on log/blobs 
     - autoencoder grid search over hyperparameters
-  code:
-    - replace all manual caching
 '''
 
 # This ratio is the number of empty values divided by the total number of rows
@@ -98,6 +96,7 @@ import numpy as np
 import os
 import pandas as pd
 import percache
+import sys
 import time
 
 cache = percache.Cache(".cache", livesync=True)
@@ -995,6 +994,10 @@ def main():
       action='store_true')
 
   args = parser.parse_args()
+
+  if len(sys.argv) == 1:
+    parser.print_help()
+    sys.exit()
 
   if args.s:
     do_simple_regression()
