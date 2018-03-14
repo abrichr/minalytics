@@ -15,6 +15,15 @@ It performs the following tasks:
     with k-fold cross-validation
   - Print Pearson's Correlation Coefficient and the standard deviation across
     folds for each target
+
+TODO:
+  model:
+    - blob detection
+    - regression using blob features
+    - autoencoder on log/blobs 
+    - autoencoder grid search over hyperparameters
+  code:
+    - replace all manual caching
 '''
 
 # This ratio is the number of empty values divided by the total number of rows
@@ -51,12 +60,6 @@ EXCEL_WORKBOOK_PATH = 'snlworkbook_Combined.xls'
 # Path to magnetic grid file (text)
 MAGNETIC_GRID_PATH = '200 m mag deg.dat'
 
-# Path to augmented data file
-AUGMENTED_DATA_PATH = 'augmented_data.pkl'
-
-# Path to non-augmented data file
-DATA_PATH = 'data.pkl'
-
 # Size of patch of magnetic data in metres
 MAG_PATCH_SIZE_M = 10000
 
@@ -69,7 +72,6 @@ NUM_PCA_COMPONENTS = 10
 # Set to True for verbose logging
 DEBUG = True
 
-
 import logging
 #log_format = '%(asctime)s : %(name)s : %(levelname)s : %(message)s'
 log_format = '%(asctime)s : %(message)s'
@@ -77,7 +79,6 @@ logging.basicConfig(format=log_format, level=logging.WARN)
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG if DEBUG else logging.INFO)
 
-from cachier import cachier
 from collections import Counter
 from functools import partial
 from matplotlib import cm
@@ -90,19 +91,15 @@ from skimage.measure import shannon_entropy
 from sklearn.pipeline import Pipeline
 from xlrd import open_workbook
 import argparse
-try:
-  import cPickle as pickle
-except:
-  import pickle
 import csv
 import datetime
 import matplotlib.pyplot as plt
 import numpy as np
 import os
 import pandas as pd
+import percache
 import time
 
-import percache
 cache = percache.Cache(".cache", livesync=True)
 
 @cache
@@ -146,6 +143,12 @@ class ColType(object):
   CAT = 'CATEGORICAL'
   MULTI = 'MULTICATEGORICAL'
 
+PY3 = False
+try:
+  unicode('')
+except NameError:
+  PY3 = True
+
 def parse_cols(df):
 
   empty_cols = []
@@ -162,7 +165,7 @@ def parse_cols(df):
       logger.info('\t==> Numerical')
       num_cols.append(col)
     elif dtype == np.object:
-      nonempty_vals = [unicode(v) for v in vals if v not in ['', None]]
+      nonempty_vals = [v if PY3 else unicode(v) for v in vals if v not in ['', None]]
       unique_vals = list(set(nonempty_vals))
       if len(unique_vals) <= 1:
         empty_cols.append(col)
@@ -396,17 +399,8 @@ def get_target_cols(cols_by_type):
   logger.info('target_cols:\n\t%s' % '\n\t'.join(target_cols))
   return target_cols
 
-def get_data(from_disk=True):
-  if from_disk and os.path.exists(DATA_PATH):
-    logger.info('reading %s...' % DATA_PATH)
-    try:
-      f = open(DATA_PATH)
-      df, cols_by_type, target_cols = pickle.load(f)
-      return df, cols_by_type, target_cols
-    except Exception as e:
-      logger.info('e: %s' % e)
-      logger.info('recreating...')
-
+@cache
+def get_data():
   logger.info('Preparing data...')
   start_time = time.time()
 
@@ -433,10 +427,6 @@ def get_data(from_disk=True):
 
   logger.info('Data preparation took: %.2fs' % (time.time() - start_time))
 
-  logger.info('saving to %s' % DATA_PATH)
-  f = open(DATA_PATH, 'w')
-  pickle.dump([df, cols_by_type, target_cols], f)
-
   return df, cols_by_type, target_cols
 
 from sklearn.svm import SVR
@@ -447,6 +437,7 @@ regs = [
 ]
 
 def regress(df, target_cols, data_cols=None):
+  data_cols = data_cols or []
   logger.info('regressing, df.shape: %s, target_cols:\n%s, data_cols:\n%s' % (
     str(df.shape), pformat(sorted(target_cols)), pformat(sorted(data_cols))))
   for target_col in target_cols:
@@ -480,12 +471,6 @@ def do_simple_regression():
   logger.info('rows: %s, cols: %s' % (rows, cols))
 
   regress(df, target_cols)
-
-from klepto import inf_cache
-from klepto.archives import dir_archive
-from klepto.keymaps import keymap
-archive = dir_archive('__cache__', serialized=True, cached=False)
-ca = inf_cache(tol=1, ignore=('**','out'), cache=archive, keymap=keymap())
 
 @cache
 def read_magnetic_data(
@@ -522,7 +507,6 @@ def read_magnetic_data(
     df = df[df.x.isin(x) & df.y.isin(y)]
     logger.info('after df.shape: %s' % str(df.shape))
 
-
   return df
 
 def get_lat_lon_cols(cols):
@@ -541,37 +525,6 @@ def time_func(func, name, verbose=False):
   print_func('func: %s, duration: %.2f' % (name, duration))
   return rval
 
-def extract_grid(mag_df, cx, cy, box_size_m=MAG_PATCH_SIZE_M):
-  half_size = box_size_m / 2.0
-
-  x0 = int(cx - half_size)
-  x1 = int(cx + half_size)
-  y0 = int(cy - half_size)
-  y1 = int(cy + half_size)
-
-  #mag_df.loc[(x0,y0):(x1,y1)]
-
-  x_mask = time_func(lambda: abs(mag_df.x - cx) < half_size,
-      'abs(mag_df.x - cx) < half_size')
-  y_mask = time_func(lambda: abs(mag_df.y - cy) < half_size,
-      'abs(mag_df.y - cy) < half_size')
-  mask = time_func(lambda: x_mask & y_mask,
-      'x_mask & y_mask')
-  region = time_func(lambda: mag_df[mask],
-      'mag_df[mask]')
-  n_cols = time_func(lambda: len(region.x.unique()),
-      'len(region.x.unique())')
-  n_rows = time_func(lambda: len(region.y.unique()),
-      'len(region.y.unique())')
-  grid = time_func(lambda: region.mag.values.reshape((n_rows, n_cols)),
-      'region.mag.values.reshape((n_rows, n_cols))')
-
-  # TOOD: remove
-  #grid2 = region.pivot(index='x', columns='y', values='mag').values
-  #assert np.allclose(grid, grid2)
-
-  return grid
-
 def get_mag_region(mag_df, pivot, row, lat_col, lon_col, box_size_m=MAG_PATCH_SIZE_M):
   try:
     d_lat = abs(mag_df.lat - row[lat_col])
@@ -581,7 +534,6 @@ def get_mag_region(mag_df, pivot, row, lat_col, lon_col, box_size_m=MAG_PATCH_SI
     row = mag_df.loc[argmin]
     cx = row.x
     cy = row.y
-    #grid = extract_grid(mag_df, cx, cy)
     grid = extract_grid_from_pivot(pivot, cx, cy)
   except Exception as e:
     logger.warn('e: %s' % e)
@@ -590,17 +542,8 @@ def get_mag_region(mag_df, pivot, row, lat_col, lon_col, box_size_m=MAG_PATCH_SI
   logger.info('grid.shape: %s' % str(grid.shape))
   return grid
 
-def get_full_data(from_disk=True, max_rows=None):
-  if from_disk and os.path.exists(AUGMENTED_DATA_PATH):
-    logger.info('reading %s...' % AUGMENTED_DATA_PATH)
-    try:
-      f = open(AUGMENTED_DATA_PATH)
-      grids, df, cols_by_type, target_cols = pickle.load(f)
-      return grids, df, cols_by_type, target_cols
-    except Exception as e:
-      logger.info('e: %s' % e)
-      logger.info('recreating...')
-
+@cache
+def get_full_data(max_rows=None):
   mag_df = read_magnetic_data()
 
   df, cols_by_type, target_cols = get_data()
@@ -646,14 +589,10 @@ def get_full_data(from_disk=True, max_rows=None):
       logger.warn('e:', e)
       import ipdb; ipdb.set_trace()
 
-  logger.info('saving to %s' % AUGMENTED_DATA_PATH)
-  f = open(AUGMENTED_DATA_PATH, 'w')
-  pickle.dump([grids, df, cols_by_type, target_cols], f)
-  #df.to_csv(AUGMENTED_DATA_PATH, encoding='utf-8')
-
   return grids, df, cols_by_type, target_cols
 
-def add_magnetic_features(df, grids, num_pca_components=NUM_PCA_COMPONENTS):
+@cache
+def get_magnetic_features(df, grids, num_pca_components=NUM_PCA_COMPONENTS):
   feats = {name: [] for name in [
     'min',
     'max',
@@ -678,8 +617,11 @@ def add_magnetic_features(df, grids, num_pca_components=NUM_PCA_COMPONENTS):
   pca = get_magnetic_pca()
   kpca = get_magnetic_kpca()
 
-  for grid in grids:
-    logger.debug('grid.shape: %s' % str(grid.shape))
+  logger.info('transforming %d grids of shape %s...' % (len(grids), str(grids[0].shape)))
+  for i_grid, grid in enumerate(grids):
+    pct_done = int(1.0 * i_grid / len(grids) * 100)
+    if i_grid and i_grid % 100 == 0:
+      logger.info('%d%% done' % pct_done)
     mn = grid.min()
     mx = grid.max()
     std = grid.std()
@@ -715,16 +657,15 @@ def add_magnetic_features(df, grids, num_pca_components=NUM_PCA_COMPONENTS):
     feats['asm'].append(asm)
     feats['sum'].append(_sum)
 
-  for name, vals in feats.iteritems():
-    logger.info('name: %s val: %s' % (name, vals[0]))
-    df[name] = vals
-
-  # return ['mn', 'mx', 'std', 'sum']
-  return feats.keys()
+  return feats
 
 def do_magnetic_regression():
-  grids, df, cols_by_type, target_cols = get_full_data(from_disk=True)
-  mag_feat_names = add_magnetic_features(df, grids)
+  grids, df, cols_by_type, target_cols = get_full_data()
+  feats = get_magnetic_features(df, grids)
+  for name, vals in feats.items():
+    logger.info('name: %s val: %s' % (name, vals[0]))
+    df[name] = vals
+  mag_feat_names = feats.keys()
   regress(df, target_cols, mag_feat_names)
 
 @cache
@@ -745,37 +686,30 @@ def display_full_magnetic_grid(save=True, show=True, stride=5):
     return
 
   dpi = [np.inf]
-  def _intensity(do_log):
+  def _display(f, do_log, title, pos):
     mag_df = read_magnetic_data(stride=stride)
     pivot = get_pivot(mag_df)
-    grid = pivot.values
-    if do_log:
-      grid = np.log(grid)
-    mn = grid.min()
-    mx = grid.max()
-    logger.info('mn: %s, mx: %s' % (mn, mx))
-    logger.info('grid.shape: %s' % str(grid.shape))
-    pos = 3 if do_log else 1
-    ax = plt.subplot(2,2,pos)
-    plt.imshow(grid)
-    ax.get_xaxis().set_visible(False)
-    ax.get_yaxis().set_visible(False)
-    title = 'Magnetic Intensity' + (' (log)' if do_log else '')
-    ax.set_title(title)
-    dpi[0] = min(dpi[0], min(grid.shape))
-    logger.info('dpi: %s' % dpi)
-
-  _intensity(False)
-  _intensity(True)
-
-  def _contour(do_log):
-    mag_df = read_magnetic_data(stride=stride)
-    pivot = get_pivot(mag_df)
+    x = pivot.columns
+    y = pivot.index
     Z = pivot.values
     if do_log:
       Z = np.log(Z)
-    y = pivot.index
-    x = pivot.columns
+    ax = plt.subplot(2,2,pos)
+    f(Z, x, y)
+    ax.get_xaxis().set_visible(False)
+    ax.get_yaxis().set_visible(False)
+    ax.set_title(title)
+    dpi[0] = min(dpi[0], min(Z.shape))
+    logger.info('dpi: %s' % dpi)
+
+  def _intensity(Z, _, __):
+    mn = Z.min()
+    mx = Z.max()
+    logger.info('mn: %s, mx: %s' % (mn, mx))
+    logger.info('Z.shape: %s' % str(Z.shape))
+    plt.imshow(Z)
+
+  def _contours(Z, x, y):
     logger.debug('Z.dtype: %s, x.dtype: %s, y.dtype: %s' % (
       Z.dtype, x.dtype, y.dtype))
     logger.debug('Z.shape: %s, x.shape: %s, y.shape: %s' % (
@@ -784,19 +718,13 @@ def display_full_magnetic_grid(save=True, show=True, stride=5):
     X, Y = np.meshgrid(x, y)
     nr, nc = Z.shape
     logger.info('plt.contourf()...')
-    pos = 4 if do_log else 2
-    ax = plt.subplot(2,2,pos)
     CS = plt.contourf(X, Y, Z, 10, cmap=plt.cm.bone)#, origin='lower')
-    title = 'Magnetic Contours' + (' (log)' if do_log else '')
-    ax.set_title(title)
-    ax.get_xaxis().set_visible(False)
-    ax.get_yaxis().set_visible(False)
     plt.colorbar(CS)
-    dpi[0] = min(dpi[0], min(Z.shape))
-    logger.info('dpi: %s' % dpi)
 
-  _contour(False)
-  _contour(True)
+  _display(_intensity, False, 'Magnetic Intensity', 1)
+  _display(_intensity, True, 'Magnetic Intensity (log)', 3)
+  _display(_contours, False, 'Magnetic Contours', 2)
+  _display(_contours, True, 'Magnetic Contours(log)', 4)
 
   if save:
     filename = 'grid.png'
@@ -810,7 +738,7 @@ def display_magnetic_grids(save=True, show=False):
   if not (save or show):
     return
 
-  grids, df, cols_by_type, target_cols = get_full_data(from_disk=True)
+  grids, df, cols_by_type, target_cols = get_full_data()
   lat_col, lon_col = get_lat_lon_cols(df.columns)
 
   mn = min([grid.min() for grid in grids])
@@ -841,7 +769,6 @@ def display_magnetic_grids(save=True, show=False):
       plt.savefig(filename)
     if show:
       plt.show()
-
 
 def extract_grid_from_pivot(pivot, cx, cy, box_size_m=MAG_PATCH_SIZE_M):
   half_size = box_size_m / 2.0
@@ -889,50 +816,41 @@ def extract_all_grids(flatten=True):
 
   return X
 
-def _do_mag_pca(Klass, fname, pct_rows=None):
-  try:
-    with open(fname, 'r') as f:
-      logger.info('Loading %s...' % fname)
-      pca = pickle.load(f)
-  except:
-    logger.info('Unable to load %s, recalculating...' % fname)
-    X = extract_all_grids()
+@cache
+def _do_mag_pca(Klass, pct_rows=None):
+  X = extract_all_grids()
 
-    # Standardize
-    mean = X.mean(axis=0)
-    X -= mean
-    std = X.std(axis=0)
-    X /= std
+  # Standardize
+  mean = X.mean(axis=0)
+  X -= mean
+  std = X.std(axis=0)
+  X /= std
 
-    pca = Klass()  # PCA() or KernelPCA()
+  pca = Klass()  # PCA() or KernelPCA()
 
-    if pct_rows is not None:
-      n_rows = int(X.shape[0] * pct_rows)
-      logger.debug('pct_rows: %s, n_rows: %s' % (pct_rows, n_rows))
-      row_idxs = np.random.choice(range(X.shape[0]), size=(n_rows,))
-      X_ = []
-      for i in row_idxs:
-        X_.append(X[i,:])
-      X = np.array(X_)
-      logger.debug('new X.shape: %s' % str(X.shape))
+  if pct_rows is not None:
+    n_rows = int(X.shape[0] * pct_rows)
+    logger.debug('pct_rows: %s, n_rows: %s' % (pct_rows, n_rows))
+    row_idxs = np.random.choice(range(X.shape[0]), size=(n_rows,))
+    X_ = []
+    for i in row_idxs:
+      X_.append(X[i,:])
+    X = np.array(X_)
+    logger.debug('new X.shape: %s' % str(X.shape))
 
-    # TODO: change name of func depending on Klass
-    time_func(partial(pca.fit, X), 'PCA.fit()', verbose=True)
-
-    logger.info('Dumping to %s...' % fname)
-    with open(fname, 'w') as f:
-      pickle.dump(pca, f)
-    logger.info('Done.')
+  # TODO: change name of func depending on Klass
+  func_name = Klass.__name__ + '.fit()'
+  time_func(partial(pca.fit, X), func_name, verbose=True)
 
   return pca
 
-def get_magnetic_kpca(fname='magkpca.pkl'):
-  return _do_mag_pca(partial(KernelPCA, kernel='rbf'), fname,
-      #pct_rows=0.1
+def get_magnetic_kpca():
+  return _do_mag_pca(partial(KernelPCA, kernel='rbf'),
+      pct_rows=0.1
   )
 
-def get_magnetic_pca(fname='magpca.pkl'):
-  return _do_mag_pca(PCA, fname)
+def get_magnetic_pca():
+  return _do_mag_pca(PCA)
 
 def _display_pca(pca, name, save=True, show=False, n_components=10):
   # show/save first N principal components
@@ -962,11 +880,7 @@ def do_pca():
 
 def do_kpca():
   kpca = get_magnetic_kpca()
-  # TODO: fix this:
   import ipdb; ipdb.set_trace()
-
-#from functools import lru_cache
-#@lru_cache()
 
 def do_autoencoder():
   # https://blog.keras.io/building-autoencoders-in-keras.html
@@ -990,10 +904,7 @@ def do_autoencoder():
     logger.info('shape: %s' % str(shape))  # (50, 50, 1)
     input_img = Input(shape=shape)
 
-  '''
-  16: # of output filters
-  (3, 3): kernel size
-  '''
+  # Conv2D(<num_output_filters>, <kernel_size>)
   x1 = Conv2D(16, (3, 3), activation='relu', padding='same')(input_img)
   x2 = MaxPooling2D((2, 2), padding='same')(x1)
   x3 = Conv2D(8, (3, 3), activation='relu', padding='same')(x2)
@@ -1001,8 +912,8 @@ def do_autoencoder():
   x5 = Conv2D(8, (3, 3), activation='relu', padding='same')(x4)
   encoded = MaxPooling2D((2, 2), padding='same')(x5)
 
-  # at this point the representation is (4, 4, 8) i.e. 128-dimensional
-  # at this point the representation is (7, 7, 8) i.e. 392-dimensional
+  # at this point the representation is (4, 4, 8) i.e. 128-dimensional (MNIST)
+  # at this point the representation is (7, 7, 8) i.e. 392-dimensional (MAGNETIC)
 
   x6 = Conv2D(8, (3, 3), activation='relu', padding='same')(encoded)
   x7 = UpSampling2D((2, 2))(x6)
@@ -1040,12 +951,17 @@ def do_autoencoder():
 
   logger.info('Fitting autoencoder...')
   try:
-    autoencoder.fit(x_train, x_train, epochs=50, batch_size=128, shuffle=True, validation_data=(x_test, x_test), callbacks=[TensorBoard(log_dir='/tmp/autoencoder')])
+    autoencoder.fit(
+        x_train, x_train,
+        epochs=50,
+        batch_size=128,
+        shuffle=True,
+        validation_data=(x_test, x_test),
+        callbacks=[TensorBoard(log_dir='/tmp/autoencoder')])
   except Exception as e:
     import ipdb; ipdb.set_trace()
 
   import ipdb; ipdb.set_trace()
-
 
 def main():
   parser = argparse.ArgumentParser()
