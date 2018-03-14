@@ -90,7 +90,10 @@ from skimage.measure import shannon_entropy
 from sklearn.pipeline import Pipeline
 from xlrd import open_workbook
 import argparse
-import cPickle as pickle
+try:
+  import cPickle as pickle
+except:
+  import pickle
 import csv
 import datetime
 import matplotlib.pyplot as plt
@@ -99,7 +102,10 @@ import os
 import pandas as pd
 import time
 
-@cachier()
+import percache
+cache = percache.Cache(".cache", livesync=True)
+
+@cache
 def load_dataframe():
   data_fname = EXCEL_WORKBOOK_PATH
   wb = open_workbook(data_fname)
@@ -475,8 +481,16 @@ def do_simple_regression():
 
   regress(df, target_cols)
 
+from klepto import inf_cache
+from klepto.archives import dir_archive
+from klepto.keymaps import keymap
+archive = dir_archive('__cache__', serialized=True, cached=False)
+ca = inf_cache(tol=1, ignore=('**','out'), cache=archive, keymap=keymap())
+
+@cache
 def read_magnetic_data(
-    magnetic_grid_path=MAGNETIC_GRID_PATH
+    magnetic_grid_path=MAGNETIC_GRID_PATH,
+    stride=None
 ):
   # N: positive latitude
   # S: negative latitude
@@ -500,14 +514,14 @@ def read_magnetic_data(
   )
   logger.info('done, took: %.2fs' % (time.time() - start_time))
 
-  if 0:
-    logger.info('setting index...')
-    df = df.set_index(['lat', 'lon'])
+  if stride is not None:
+    logger.info('striding: %s' % stride)
+    logger.info('before df.shape: %s' % str(df.shape))
+    x = np.array(list(set(df.x))[::stride])
+    y = np.array(list(set(df.y))[::stride])
+    df = df[df.x.isin(x) & df.y.isin(y)]
+    logger.info('after df.shape: %s' % str(df.shape))
 
-  if 0:
-    logger.info('writing to outfile...')
-    df.to_csv(magnetic_grid_path + '.degonly', header=False, index=False)
-    logger.info('done')
 
   return df
 
@@ -713,7 +727,9 @@ def do_magnetic_regression():
   mag_feat_names = add_magnetic_features(df, grids)
   regress(df, target_cols, mag_feat_names)
 
+@cache
 def get_pivot(mag_df):
+  logger.info('Pivoting...')
   pivot = mag_df.pivot(index='x', columns='y', values='mag')
   grid = pivot.values
   vals = grid.flatten()
@@ -724,31 +740,71 @@ def get_pivot(mag_df):
   pivot = pivot.clip(clip_min)
   return pivot
 
-def display_full_magnetic_grid(save=True, show=False):
+def display_full_magnetic_grid(save=True, show=True, stride=5):
   if not (save or show):
     return
 
-  mag_df = read_magnetic_data()
-  pivot = get_pivot(mag_df)
-  grid = pivot.values
+  dpi = [np.inf]
+  def _intensity(do_log):
+    mag_df = read_magnetic_data(stride=stride)
+    pivot = get_pivot(mag_df)
+    grid = pivot.values
+    if do_log:
+      grid = np.log(grid)
+    mn = grid.min()
+    mx = grid.max()
+    logger.info('mn: %s, mx: %s' % (mn, mx))
+    logger.info('grid.shape: %s' % str(grid.shape))
+    pos = 3 if do_log else 1
+    ax = plt.subplot(2,2,pos)
+    plt.imshow(grid)
+    ax.get_xaxis().set_visible(False)
+    ax.get_yaxis().set_visible(False)
+    title = 'Magnetic Intensity' + (' (log)' if do_log else '')
+    ax.set_title(title)
+    dpi[0] = min(dpi[0], min(grid.shape))
+    logger.info('dpi: %s' % dpi)
 
-  mn = grid.min()
-  mx = grid.max()
+  _intensity(False)
+  _intensity(True)
 
-  logger.info('mn: %s, mx: %s' % (mn, mx))
-  logger.info('grid.shape: %s' % str(grid.shape))
+  def _contour(do_log):
+    mag_df = read_magnetic_data(stride=stride)
+    pivot = get_pivot(mag_df)
+    Z = pivot.values
+    if do_log:
+      Z = np.log(Z)
+    y = pivot.index
+    x = pivot.columns
+    logger.debug('Z.dtype: %s, x.dtype: %s, y.dtype: %s' % (
+      Z.dtype, x.dtype, y.dtype))
+    logger.debug('Z.shape: %s, x.shape: %s, y.shape: %s' % (
+      str(Z.shape), str(x.shape), str(y.shape)))
+    logger.info('np.meshgrid()...')
+    X, Y = np.meshgrid(x, y)
+    nr, nc = Z.shape
+    logger.info('plt.contourf()...')
+    pos = 4 if do_log else 2
+    ax = plt.subplot(2,2,pos)
+    CS = plt.contourf(X, Y, Z, 10, cmap=plt.cm.bone)#, origin='lower')
+    title = 'Magnetic Contours' + (' (log)' if do_log else '')
+    ax.set_title(title)
+    ax.get_xaxis().set_visible(False)
+    ax.get_yaxis().set_visible(False)
+    plt.colorbar(CS)
+    dpi[0] = min(dpi[0], min(Z.shape))
+    logger.info('dpi: %s' % dpi)
 
-  plt.imshow(grid)
+  _contour(False)
+  _contour(True)
 
   if save:
     filename = 'grid.png'
-    logger.info('Saving to file %s' % filename)
-    plt.savefig(filename, dpi=min(grid.shape))
+    logger.info('Saving to file %s...' % filename)
+    plt.savefig(filename, dpi=dpi[0])
   if show:
+    logger.info('plt.show()...')
     plt.show()
-
-  import ipdb; ipdb.set_trace()
-
 
 def display_magnetic_grids(save=True, show=False):
   if not (save or show):
@@ -796,7 +852,8 @@ def extract_grid_from_pivot(pivot, cx, cy, box_size_m=MAG_PATCH_SIZE_M):
   grid = pivot.loc[x0:x1,y0:y1].values
   return grid
 
-def extract_all_grids():
+@cache
+def extract_all_grids(flatten=True):
   mag_df = read_magnetic_data()
   pivot = get_pivot(mag_df)
 
@@ -824,7 +881,8 @@ def extract_all_grids():
       if n % 1000 == 0:
         logger.debug('x: %d of %d, y: %d of %d, shape: %s, %d%% complete' % (
           ix, nx, iy, ny, str(grid.shape), int(pct)))
-      X.append(grid.flatten())
+      vals = grid.flatten() if flatten else grid
+      X.append(vals)
       n += 1
   X = np.array(X)
   logger.info("X.shape: %s" % str(X.shape))
@@ -869,8 +927,10 @@ def _do_mag_pca(Klass, fname, pct_rows=None):
   return pca
 
 def get_magnetic_kpca(fname='magkpca.pkl'):
-  return _do_mag_pca(partial(KernelPCA, kernel='rbf'), fname, pct_rows=0.1)
-  
+  return _do_mag_pca(partial(KernelPCA, kernel='rbf'), fname,
+      #pct_rows=0.1
+  )
+
 def get_magnetic_pca(fname='magpca.pkl'):
   return _do_mag_pca(PCA, fname)
 
@@ -905,6 +965,88 @@ def do_kpca():
   # TODO: fix this:
   import ipdb; ipdb.set_trace()
 
+#from functools import lru_cache
+#@lru_cache()
+
+def do_autoencoder():
+  # https://blog.keras.io/building-autoencoders-in-keras.html
+
+  from keras.callbacks import TensorBoard
+  from keras.layers import Input, Dense, Conv2D, MaxPooling2D, UpSampling2D
+  from keras.models import Model
+  from keras import backend as K
+
+  USE_MNIST = False
+  if USE_MNIST:
+    input_img = Input(shape=(28, 28, 1))  # adapt this if using `channels_first` image data format
+  else:
+    X = extract_all_grids(flatten=False)  # (48000, 51, 51)
+    _, nrows, ncols = X.shape
+    nrows = nrows if nrows % 2 == 0 else nrows + 1
+    ncols = ncols if ncols % 2 == 0 else ncols + 1
+    #X = np.array([grid[:nrows,:ncols] for grid in X])
+    X = np.array([np.pad(grid, ((0, 1), (0, 1)), mode='edge') for grid in X])
+    shape = (nrows, ncols, 1) # shape = list(X[0].shape) + [1]
+    logger.info('shape: %s' % str(shape))  # (50, 50, 1)
+    input_img = Input(shape=shape)
+
+  '''
+  16: # of output filters
+  (3, 3): kernel size
+  '''
+  x1 = Conv2D(16, (3, 3), activation='relu', padding='same')(input_img)
+  x2 = MaxPooling2D((2, 2), padding='same')(x1)
+  x3 = Conv2D(8, (3, 3), activation='relu', padding='same')(x2)
+  x4 = MaxPooling2D((2, 2), padding='same')(x3)
+  x5 = Conv2D(8, (3, 3), activation='relu', padding='same')(x4)
+  encoded = MaxPooling2D((2, 2), padding='same')(x5)
+
+  # at this point the representation is (4, 4, 8) i.e. 128-dimensional
+  # at this point the representation is (7, 7, 8) i.e. 392-dimensional
+
+  x6 = Conv2D(8, (3, 3), activation='relu', padding='same')(encoded)
+  x7 = UpSampling2D((2, 2))(x6)
+  x8 = Conv2D(8, (3, 3), activation='relu', padding='same')(x7)
+  x9 = UpSampling2D((2, 2))(x8)
+  x10 = Conv2D(16, (3, 3), activation='relu')(x9)
+  x11 = UpSampling2D((2, 2))(x10)
+  decoded = Conv2D(1, (3, 3), activation='sigmoid', padding='same')(x11)
+
+  autoencoder = Model(input_img, decoded)
+  autoencoder.compile(optimizer='adadelta', loss='binary_crossentropy')
+
+  if USE_MNIST:
+    from keras.datasets import mnist
+    (x_train, _), (x_test, _) = mnist.load_data()
+    #(60000, 28, 28), (10000, 28, 28)
+
+    x_train = x_train.astype('float32') / 255.
+    x_test = x_test.astype('float32') / 255.
+    x_train = np.reshape(x_train, (len(x_train), 28, 28, 1))  # adapt this if using `channels_first` image data format
+    x_test = np.reshape(x_test, (len(x_test), 28, 28, 1))  # adapt this if using `channels_first` image data format
+
+  else:
+
+    x_train, x_test = model_selection.train_test_split(X, test_size=0.15)
+
+    x_train -= x_train.min()
+    x_train /= x_train.max()
+    x_test -= x_test.min()
+    x_test /= x_test.max()
+
+    x_train = np.reshape(x_train, [len(x_train)] + list(shape))
+    x_test = np.reshape(x_test, [len(x_test)] + list(shape))
+
+
+  logger.info('Fitting autoencoder...')
+  try:
+    autoencoder.fit(x_train, x_train, epochs=50, batch_size=128, shuffle=True, validation_data=(x_test, x_test), callbacks=[TensorBoard(log_dir='/tmp/autoencoder')])
+  except Exception as e:
+    import ipdb; ipdb.set_trace()
+
+  import ipdb; ipdb.set_trace()
+
+
 def main():
   parser = argparse.ArgumentParser()
   parser.add_argument(
@@ -931,6 +1073,10 @@ def main():
       '-f',
       help='Display full magnetic grid',
       action='store_true')
+  parser.add_argument(
+      '-a',
+      help='Train Autoencoder and save to disk',
+      action='store_true')
 
   args = parser.parse_args()
 
@@ -951,6 +1097,9 @@ def main():
 
   if args.f:
     display_full_magnetic_grid()
+
+  if args.a:
+    do_autoencoder()
 
 if __name__ == '__main__':
   main()
