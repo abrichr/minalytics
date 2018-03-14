@@ -1,7 +1,8 @@
 from __future__ import print_function
 
 '''
-This script performs a regression in columns imported from an excel workbook.
+This script performs a regression in columns imported from an excel workbook,
+and the associated aeromagnetic data.
 
 It performs the following tasks:
   - Import data from first worksheet in a workbook
@@ -17,11 +18,10 @@ It performs the following tasks:
   - TODO: And lots more...
 
 TODO:
-  model:
-    - blob detection
-    - regression using blob features
-    - autoencoder on log/blobs 
-    - autoencoder grid search over hyperparameters
+  - blob detection
+  - regression using blob features
+  - autoencoder on log/blobs
+  - autoencoder grid search over hyperparameters
 '''
 
 # This ratio is the number of empty values divided by the total number of rows
@@ -101,6 +101,8 @@ import time
 
 cache = percache.Cache(".cache", livesync=True)
 
+PY3 = sys.version_info >= (3, 0)
+
 @cache
 def load_dataframe():
   data_fname = EXCEL_WORKBOOK_PATH
@@ -142,14 +144,7 @@ class ColType(object):
   CAT = 'CATEGORICAL'
   MULTI = 'MULTICATEGORICAL'
 
-PY3 = False
-try:
-  unicode('')
-except NameError:
-  PY3 = True
-
 def parse_cols(df):
-
   empty_cols = []
   num_cols = []
   text_cols = []
@@ -325,11 +320,9 @@ def convert_multi_to_onehot(df, cols_by_type):
 def convert_cat_to_onehot(df, cols_by_type,
                           max_unique_vals_to_rows=MAX_UNIQUE_VALS_TO_ROWS):
   num_cols_to_add = 0
-  #unique_vals_by_col = {}
   for col in sorted(cols_by_type[ColType.CAT]):
     vals = df[col]
     unique_vals = set(vals) - set([None])
-    #unique_vals_by_col[col] = unique_vals
     unique_vals_to_rows = 1.0 * len(unique_vals) / df.shape[0]
     if 1.0 * len(unique_vals) / df.shape[0] > max_unique_vals_to_rows:
       logger.debug(('\tRemoving column, unique_vals_to_rows: %.4f, col: %s, '
@@ -837,7 +830,6 @@ def _do_mag_pca(Klass, pct_rows=None):
     X = np.array(X_)
     logger.debug('new X.shape: %s' % str(X.shape))
 
-  # TODO: change name of func depending on Klass
   func_name = Klass.__name__ + '.fit()'
   time_func(partial(pca.fit, X), func_name, verbose=True)
 
@@ -929,24 +921,18 @@ def do_autoencoder():
     from keras.datasets import mnist
     (x_train, _), (x_test, _) = mnist.load_data()
     #(60000, 28, 28), (10000, 28, 28)
-
     x_train = x_train.astype('float32') / 255.
     x_test = x_test.astype('float32') / 255.
     x_train = np.reshape(x_train, (len(x_train), 28, 28, 1))  # adapt this if using `channels_first` image data format
     x_test = np.reshape(x_test, (len(x_test), 28, 28, 1))  # adapt this if using `channels_first` image data format
-
   else:
-
     x_train, x_test = model_selection.train_test_split(X, test_size=0.15)
-
     x_train -= x_train.min()
     x_train /= x_train.max()
     x_test -= x_test.min()
     x_test /= x_test.max()
-
     x_train = np.reshape(x_train, [len(x_train)] + list(shape))
     x_test = np.reshape(x_test, [len(x_test)] + list(shape))
-
 
   logger.info('Fitting autoencoder...')
   try:
