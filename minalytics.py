@@ -18,8 +18,6 @@ It performs the following tasks:
   - TODO: And lots more...
 
 TODO:
-  - find the 10 highest density magnetic regions over 10,000m2 and less than
-    1,000,000m2
   - ANN features -> targets
   - CNN images -> targets
   - additional data dimensions
@@ -87,8 +85,10 @@ from mpl_toolkits.mplot3d import Axes3D
 from pprint import pprint, pformat
 from sklearn import preprocessing, metrics, linear_model, model_selection
 from sklearn.decomposition import PCA, KernelPCA
+from skimage import filters
 from skimage.feature import greycomatrix, greycoprops
-from skimage.measure import shannon_entropy
+from skimage.measure import shannon_entropy, regionprops
+from skimage.morphology import label
 from sklearn.pipeline import Pipeline
 from xlrd import open_workbook
 import argparse
@@ -614,9 +614,8 @@ def get_magnetic_features(df, grids, num_pca_components=NUM_PCA_COMPONENTS):
 
   logger.info('transforming %d grids of shape %s...' % (len(grids), str(grids[0].shape)))
   for i_grid, grid in enumerate(grids):
-    pct_done = int(1.0 * i_grid / len(grids) * 100)
     if i_grid and i_grid % 100 == 0:
-      logger.info('%d%% done' % pct_done)
+      progress_bar(i_grid, len(grids))
     mn = grid.min()
     mx = grid.max()
     std = grid.std()
@@ -657,7 +656,6 @@ def get_magnetic_features(df, grids, num_pca_components=NUM_PCA_COMPONENTS):
 def do_magnetic_regression():
   grids, df, cols_by_type, target_cols = get_full_data()
   feats = get_magnetic_features(df, grids)
-  import ipdb; ipdb.set_trace()
   for name, vals in feats.items():
     logger.info('name: %s val: %s' % (name, vals[0]))
     df[name] = vals
@@ -775,8 +773,25 @@ def extract_grid_from_pivot(pivot, cx, cy, box_size_m=MAG_PATCH_SIZE_M):
   grid = pivot.loc[x0:x1,y0:y1].values
   return grid
 
+def progress_bar(value, endvalue, suffix='', bar_length=40):
+  percent = float(value) / endvalue
+  arrow = '-' * int(round(percent * bar_length)-1) + '>'
+  spaces = ' ' * (bar_length - len(arrow))
+  s = '\rPercent: [%s] %.2f%%' % (arrow + spaces, percent * 100)
+  if suffix:
+    s += ' (%s)' % suffix
+  if percent == 1:
+    s += '\n'
+  sys.stdout.write(s)
+  sys.stdout.flush()
+
 @cache
-def extract_all_grids(flatten=True):
+def extract_all_grids(
+    flatten=True,
+    patch_size_m=MAG_PATCH_SIZE_M,
+    stride_size_m=MAG_STRIDE_SIZE_M,
+    func=None
+):
   mag_df = read_magnetic_data()
   pivot = get_pivot(mag_df)
 
@@ -787,34 +802,37 @@ def extract_all_grids(flatten=True):
 
   # loop over top left corners
   X = []
-  half_patch_size = MAG_PATCH_SIZE_M / 2
-  x_range = range(min_x, max_x - MAG_PATCH_SIZE_M, MAG_STRIDE_SIZE_M)
-  y_range = range(min_y, max_y - MAG_PATCH_SIZE_M, MAG_STRIDE_SIZE_M)
+  half_patch_size = patch_size_m / 2
+  logger.debug('half_patch_size: %s' % half_patch_size)
+  x_range = range(min_x, max_x - patch_size_m, stride_size_m)
+  y_range = range(min_y, max_y - patch_size_m, stride_size_m)
   nx = len(x_range)
   ny = len(y_range)
   n_total = nx * ny
   n = 0
   logger.info('Extracting grids...')
+  centroids = []
   for ix, x in enumerate(x_range):
     for iy, y in enumerate(y_range):
       cx = x + half_patch_size
       cy = y + half_patch_size
+      centroids.append((cx, cy))
+      # TODO: grids are not the same size (e.g. for patch size 1000)
       grid = extract_grid_from_pivot(pivot, cx, cy)
-      pct = 1.0 * n / n_total * 100
-      if n % 1000 == 0:
-        logger.debug('x: %d of %d, y: %d of %d, shape: %s, %d%% complete' % (
-          ix, nx, iy, ny, str(grid.shape), int(pct)))
+      if n % 100 == 0:
+        progress_bar(n, n_total, 'shape: %s' % str(grid.shape))
       vals = grid.flatten() if flatten else grid
+      vals = func(vals) if func else vals
       X.append(vals)
       n += 1
   X = np.array(X)
   logger.info("X.shape: %s" % str(X.shape))
 
-  return X
+  return X, centroids
 
 @cache
 def _do_mag_pca(Klass, pct_rows=None):
-  X = extract_all_grids()
+  X, _ = extract_all_grids()
 
   # Standardize
   mean = X.mean(axis=0)
@@ -889,7 +907,7 @@ def do_autoencoder():
   if USE_MNIST:
     input_img = Input(shape=(28, 28, 1))  # adapt this if using `channels_first` image data format
   else:
-    X = extract_all_grids(flatten=False)  # (48000, 51, 51)
+    X, _ = extract_all_grids(flatten=False)  # (48000, 51, 51)
     _, nrows, ncols = X.shape
     nrows = nrows if nrows % 2 == 0 else nrows + 1
     ncols = ncols if ncols % 2 == 0 else ncols + 1
@@ -962,7 +980,6 @@ def _get_masks(grids, show=False):
     im /= im.max()
     im *= 255
     im = im.astype('uint8')
-    from skimage import filters
     filts = [f for f in dir(filters) if f.startswith('threshold_')
         and not np.any([f.endswith(w) for w in ['adaptive', 'local']])]
 
@@ -975,7 +992,6 @@ def _get_masks(grids, show=False):
         val = np.zeros(im.shape)
         logger.warn('exception while running filt %s: %s' % (f, e))
       vals.append(val)
-    #vals = [getattr(filters, f)(im) for f in filts]
 
     masks = [im > val for val in vals]
     mask_sizes = [m.sum() for m in masks]
@@ -996,7 +1012,7 @@ def _get_masks(grids, show=False):
         plt.title(mask_name)
       plt.suptitle('Grid %d' % i)
       plt.show()
-  return rval 
+  return rval
 
 def _get_mask_feats(grids, masks):
   feats = {}
