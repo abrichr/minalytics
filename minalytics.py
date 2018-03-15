@@ -18,9 +18,12 @@ It performs the following tasks:
   - TODO: And lots more...
 
 TODO:
-  - blob detection
-  - regression using blob features
-  - autoencoder on log/blobs
+  - find the 10 highest density magnetic regions over 10,000m2 and less than
+    1,000,000m2
+  - ANN features -> targets
+  - CNN images -> targets
+  - additional data dimensions
+  - log magnetic features
   - autoencoder grid search over hyperparameters
 '''
 
@@ -494,8 +497,8 @@ def read_magnetic_data(
   if stride is not None:
     logger.info('striding: %s' % stride)
     logger.info('before df.shape: %s' % str(df.shape))
-    x = np.array(list(set(df.x))[::stride])
-    y = np.array(list(set(df.y))[::stride])
+    x = np.array(sorted(list(set(df.x)))[::stride])
+    y = np.array(sorted(list(set(df.y)))[::stride])
     df = df[df.x.isin(x) & df.y.isin(y)]
     logger.info('after df.shape: %s' % str(df.shape))
 
@@ -654,6 +657,7 @@ def get_magnetic_features(df, grids, num_pca_components=NUM_PCA_COMPONENTS):
 def do_magnetic_regression():
   grids, df, cols_by_type, target_cols = get_full_data()
   feats = get_magnetic_features(df, grids)
+  import ipdb; ipdb.set_trace()
   for name, vals in feats.items():
     logger.info('name: %s val: %s' % (name, vals[0]))
     df[name] = vals
@@ -713,10 +717,10 @@ def display_full_magnetic_grid(save=True, show=True, stride=5):
     CS = plt.contourf(X, Y, Z, 10, cmap=plt.cm.bone)#, origin='lower')
     plt.colorbar(CS)
 
-  _display(_intensity, False, 'Magnetic Intensity', 1)
-  _display(_intensity, True, 'Magnetic Intensity (log)', 3)
-  _display(_contours, False, 'Magnetic Contours', 2)
-  _display(_contours, True, 'Magnetic Contours(log)', 4)
+  _display(_intensity, False, 'Magnetic Intensity',       1)
+  _display(_contours,  False, 'Magnetic Contours',        2)
+  _display(_intensity, True,  'Magnetic Intensity (log)', 3)
+  _display(_contours,  True,  'Magnetic Contours (log)',  4)
 
   if save:
     filename = 'grid.png'
@@ -948,6 +952,81 @@ def do_autoencoder():
 
   import ipdb; ipdb.set_trace()
 
+@cache
+def _get_masks(grids, show=False):
+  rval = []
+  logger.info('Getting masks...')
+  for i, grid in enumerate(grids):
+    im = grid
+    im -= im.min()
+    im /= im.max()
+    im *= 255
+    im = im.astype('uint8')
+    from skimage import filters
+    filts = [f for f in dir(filters) if f.startswith('threshold_')
+        and not np.any([f.endswith(w) for w in ['adaptive', 'local']])]
+
+    vals = []
+    for f in filts:
+      filt = getattr(filters, f)
+      try:
+        val = filt(im)
+      except Exception as e:
+        val = np.zeros(im.shape)
+        logger.warn('exception while running filt %s: %s' % (f, e))
+      vals.append(val)
+    #vals = [getattr(filters, f)(im) for f in filts]
+
+    masks = [im > val for val in vals]
+    mask_sizes = [m.sum() for m in masks]
+    mask_tups = [(mask, size, name.split('_')[-1])
+        for mask, size, name in zip(masks, mask_sizes, filts)]
+    mask_tups.sort(key=lambda tup: tup[1])
+    rval.append(mask_tups)
+    if show:
+      N = len(masks) + 1
+      nr = np.ceil(np.sqrt(N))
+      nc = np.ceil((N/nr))
+      ax = plt.subplot(nr,nc,1)
+      plt.imshow(grid)
+      plt.title('grid')
+      for i, (mask, mask_size, mask_name) in enumerate(mask_tups):
+        ax = plt.subplot(nr,nc,i+2)
+        plt.imshow(mask)
+        plt.title(mask_name)
+      plt.suptitle('Grid %d' % i)
+      plt.show()
+  return rval 
+
+def _get_mask_feats(grids, masks):
+  feats = {}
+  for grid, grid_masks in zip(grids, masks):
+    for mask, size, name in grid_masks:
+      # density
+      vals = grid[mask]
+      density = vals.sum() / mask.size
+      feat_name = '%s_density' % name
+      feats.setdefault(feat_name, [])
+      feats[feat_name].append(density)
+      # area
+      area = mask.sum()
+      feat_name = '%s_area' % name
+      feats.setdefault(feat_name, [])
+      feats[feat_name].append(area)
+      # TODO: more (e.g. convexity, num holes, num connected components...)
+  return feats
+
+def do_blob_regression():
+  grids, df, cols_by_type, target_cols = get_full_data()
+  masks = _get_masks(grids)
+  mask_feats = _get_mask_feats(grids, masks)
+  for name, vals in mask_feats.items():
+    logger.info('name: %s val: %s' % (name, vals[0]))
+    df[name] = vals
+  mask_feat_names = mask_feats.keys()
+  regress(df, target_cols, mask_feat_names)
+  import ipdb; ipdb.set_trace()
+
 def main():
   parser = argparse.ArgumentParser()
   parser.add_argument(
@@ -978,6 +1057,10 @@ def main():
       '-a',
       help='Train Autoencoder and save to disk',
       action='store_true')
+  parser.add_argument(
+      '-b',
+      help='Do blob feature regression',
+      action='store_true')
 
   args = parser.parse_args()
 
@@ -1005,6 +1088,9 @@ def main():
 
   if args.a:
     do_autoencoder()
+
+  if args.b:
+    do_blob_regression()
 
 if __name__ == '__main__':
   main()
