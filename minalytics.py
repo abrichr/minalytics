@@ -72,6 +72,9 @@ NUM_PCA_COMPONENTS = 10
 # Set to True for verbose logging
 DEBUG = True
 
+# Latitude and longitude of mining sites to ignore (outliers)
+IGNORE_LAT_LON_TUPS = [(50.4386, -90.5323)]
+
 import logging
 #log_format = '%(asctime)s : %(name)s : %(levelname)s : %(message)s'
 log_format = '%(asctime)s : %(message)s'
@@ -468,7 +471,10 @@ def regress(df, target_cols, data_cols=None):
     for reg in regs:
       logger.info('\tFitting reg: %s...' % reg.__class__.__name__)
       scaler = preprocessing.StandardScaler()
-      pipeline = Pipeline([('transformer', scaler), ('estimator', reg)])
+      pipeline = Pipeline([
+        ('transformer', scaler),
+        ('estimator', reg)
+      ])
       cv = model_selection.KFold(n_splits=5)
       scores = model_selection.cross_val_score(pipeline, X, y, cv=cv)
       score, std = scores.mean(), scores.std()
@@ -987,7 +993,7 @@ def do_autoencoder():
   import ipdb; ipdb.set_trace()
 
 @cache
-def _get_masks(grids, show=False, majority_only=False):
+def _get_grid_masks(grids, show=False, majority_only=False):
   rval = []
   for i, grid in enumerate(grids):
     im = grid
@@ -1022,6 +1028,8 @@ def _get_masks(grids, show=False, majority_only=False):
     mask_tups = [(mask, size, name.split('_')[-1])
         for mask, size, name in zip(masks, mask_sizes, filts)]
     mask_tups.sort(key=lambda tup: tup[1])
+    if majority_only:
+      mask_tups = [(mask, size, name) for mask, size, name in mask_tups if name == 'majority']
     rval.append(mask_tups)
     if show:
       N = len(masks) + 1
@@ -1038,36 +1046,38 @@ def _get_masks(grids, show=False, majority_only=False):
       plt.show()
   return rval
 
-def _get_mask_feats(grids, masks):
+def _get_mask_feats(grids, masks, feat_names=None):
   feats = {}
   for grid, grid_masks in zip(grids, masks):
     for mask, size, name in grid_masks:
       # density
-      vals = grid[mask]
-      density = vals.sum() / mask.size
-      feat_name = '%s_density' % name
-      feats.setdefault(feat_name, [])
-      feats[feat_name].append(density)
+      if not feat_names or 'density' in feat_names:
+        vals = grid[mask]
+        density = vals.sum() / mask.size
+        feat_name = '%s_density' % name
+        feats.setdefault(feat_name, [])
+        feats[feat_name].append(density)
       # area
-      area = mask.sum()
-      feat_name = '%s_area' % name
-      feats.setdefault(feat_name, [])
-      feats[feat_name].append(area)
+      if not feat_names or 'area' in feat_names:
+        area = mask.sum()
+        feat_name = '%s_area' % name
+        feats.setdefault(feat_name, [])
+        feats[feat_name].append(area)
       # sum
-      vals = grid[mask]
-      vals_sum = vals.sum()
-      feat_name = '%s_sum' % name
-      feats.setdefault(feat_name, [])
-      feats[feat_name].append(vals_sum)
-
+      if not feat_names or 'sum' in feat_names:
+        vals = grid[mask]
+        vals_sum = vals.sum()
+        feat_name = '%s_sum' % name
+        feats.setdefault(feat_name, [])
+        feats[feat_name].append(vals_sum)
       # TODO: more (e.g. convexity, num holes, num connected components...)
   return feats
 
 def do_blob_regression():
   grids, df, cols_by_type, target_cols = get_full_data()
   logger.info('Getting masks...')
-  masks = _get_masks(grids)
-  mask_feats = _get_mask_feats(grids, masks)
+  masks = _get_grid_masks(grids, majority_only=True)
+  mask_feats = _get_mask_feats(grids, masks, ['sum'])
   for name, vals in mask_feats.items():
     logger.info('name: %s val: %s' % (name, vals[0]))
     df[name] = vals
@@ -1083,7 +1093,7 @@ def do_blob_test():
   raise
 
   def _get_max_density_region(patch):
-    masks = _get_masks([patch])[0]
+    masks = _get_grid_masks([patch])[0]
     max_density = None
     max_density_mask = None
     for mask, size, name in masks:
@@ -1140,31 +1150,43 @@ def do_blob_test():
 
   # https://pdfs.semanticscholar.org/1395/5c56b63bfda03224b11541a1d17d29025684.pdf
 
+def _ignore_lat_lon(grids, df, cols_by_type, target_cols):
+  logger.info('removing %s lat/lon rows...' % len(IGNORE_LAT_LON_TUPS))
+  lat_col, lon_col = get_lat_lon_cols(df)
+  for lat, lon in IGNORE_LAT_LON_TUPS:
+    ignore_mask = (df[lat_col] == lat) & (df[lon_col] == lon)
+    df = df[np.logical_not(ignore_mask)]
+    ignore_idxs = np.nonzero(ignore_mask)
+    logger.debug('ignore_idxs: %s' % ignore_idxs)
+    for ignore_idx in ignore_idxs:  # should be only one
+      grids = [g for i, g in enumerate(grids) if i != ignore_idx]
+  return grids, df, cols_by_type, target_cols
+
 def plot_mask_sum_vs_mkt_cap(annotate=False, show=False, save=True, do_log_target=True):
   # TODO: refactor
-  IGNORE_LAT_LON = [(50.4386, -90.5323)]
-  grids, df, cols_by_type, target_cols = get_full_data()
+  grids, df, cols_by_type, target_cols = _ignore_lat_lon(*get_full_data())
   lat_col, lon_col = get_lat_lon_cols(df)
-  ignore_idxs = [(lat, lon) in IGNORE_LAT_LON for lat, lon in zip(df[lat_col], df[lon_col])]
-  grids = [grid for grid, ignore in zip(grids, ignore_idxs) if not ignore]
   logger.info('Getting masks...')
-  masks = _get_masks(grids, majority_only=True)
+  masks = _get_grid_masks(grids, majority_only=True)
   mask_feats = _get_mask_feats(grids, masks)
   sums = mask_feats['majority_sum']
   areas = mask_feats['majority_area']
   for i, target_col in enumerate(target_cols):
-    isna = pd.isna(df[target_col].values)
-    iszero = df[target_col].values <= df[target_col].values.min()
     target_vals = df[target_col]
-    target_vals = [v for v, na, ignore, zero in zip(target_vals, isna, ignore_idxs, iszero) if (not na) and (not ignore) and (not zero)]
+    isna = pd.isna(target_vals)
+    iszero = target_vals <= target_vals.min()
+    target_vals = [v for v, na, zero in zip(target_vals, isna, iszero)
+                   if (not na) and (not zero)]
     target_vals = np.array(target_vals)
     if do_log_target:
       if any([t <= 0 for t in target_vals]):
         target_vals -= target_vals.min()
         target_vals += np.finfo(np.float32).eps
       target_vals = np.log(target_vals)
-    this_sums = [s for s, na, ignore, zero in zip(sums, isna, ignore_idxs, iszero) if (not na) and (not ignore) and (not zero)]
-    this_areas = [s for s, na, ignore, zero in zip(areas, isna, ignore_idxs, iszero) if (not na) and (not ignore) and (not zero)]
+    this_sums = [s for s, na, zero in zip(sums, isna, iszero)
+                 if (not na) and (not zero)]
+    this_areas = [s for s, na, zero in zip(areas, isna, iszero)
+                  if (not na) and (not zero)]
     plt.figure()
     plt.scatter(this_sums, target_vals)
     if do_log_target:
@@ -1176,14 +1198,22 @@ def plot_mask_sum_vs_mkt_cap(annotate=False, show=False, save=True, do_log_targe
     plt.ylabel(ylabel, fontsize=10)
     plt.xlabel('Total High Magnetism', fontsize=10)
     if annotate:
-      for target_val, magsum, area, lat, lon in zip(target_vals, this_sums, this_areas, df[lat_col], df[lon_col]):
+      for target_val, magsum, area, lat, lon in zip(
+          target_vals, this_sums, this_areas, df[lat_col], df[lon_col]):
         plt.annotate('%s x %s' % (lat, lon), (magsum, target_val))
         #plt.annotate('%s' % area, (magsum, target_val))
+
     reg = LinearRegression()
     X = np.array(this_sums).reshape(-1, 1)
     reg.fit(X, target_vals)
+
     score = reg.score(X, target_vals)
-    title = title + '\nR=' + str(score)
+
+    cv = model_selection.KFold(n_splits=5)
+    cross_val_scores = model_selection.cross_val_score(reg, X, target_vals, cv=cv)
+    cross_val_score = cross_val_scores.mean()
+
+    title = '%s\nR=%s\nR_cv=%s' % (title, score, cross_val_score)
     plt.title(title, fontsize=10)
     plt.plot(X, reg.predict(X), color='k')
     if show:
