@@ -18,12 +18,12 @@ It performs the following tasks:
   - TODO: And lots more...
 
 TODO:
+  - add up total high magnetism values for each owner/operator, regress with
+    market cap
   - ANN features -> targets
   - CNN images -> targets
   - additional data dimensions
-  - log magnetic features
   - autoencoder grid search over hyperparameters
-  - plot mask sum vs. market cap
 '''
 
 # This ratio is the number of empty values divided by the total number of rows
