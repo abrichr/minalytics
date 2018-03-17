@@ -23,6 +23,7 @@ TODO:
   - additional data dimensions
   - log magnetic features
   - autoencoder grid search over hyperparameters
+  - plot mask sum vs. market cap
 '''
 
 # This ratio is the number of empty values divided by the total number of rows
@@ -102,7 +103,18 @@ import percache
 import sys
 import time
 
-cache = percache.Cache(".cache", livesync=True)
+from io import IOBase
+
+def myrepr(arg):
+  if isinstance(arg, IOBase):
+    return "%s:%s" % (arg.name, os.fstat(arg.fileno())[8])
+  elif isinstance(arg, dict):
+    items = ["%r: %r" % (k, self[k]) for k in sorted(self)]
+    return "{%s}" % ", ".join(items)
+  else:
+    return repr(arg)
+
+cache = percache.Cache(".cache", livesync=True, repr=myrepr)
 
 PY3 = sys.version_info >= (3, 0)
 
@@ -426,9 +438,12 @@ def get_data():
 
 from sklearn.svm import SVR
 from sklearn.ensemble import RandomForestRegressor
+from sklearn.linear_model import LinearRegression
+
 regs = [
     #SVR(kernel='rbf', C=1e3, gamma=0.1),  # slow and innaccurate
-    RandomForestRegressor()
+    RandomForestRegressor(),
+    LinearRegression()
 ]
 
 def regress(df, target_cols, data_cols=None):
@@ -529,7 +544,7 @@ def get_mag_region(mag_df, pivot, row, lat_col, lon_col, box_size_m=MAG_PATCH_SI
     row = mag_df.loc[argmin]
     cx = row.x
     cy = row.y
-    grid = extract_grid_from_pivot(pivot, cx, cy)
+    grid = extract_grid_from_pivot(pivot, cx, cy, box_size_m)
   except Exception as e:
     logger.warn('e: %s' % e)
     import ipdb; ipdb.set_trace()
@@ -663,7 +678,8 @@ def do_magnetic_regression():
   regress(df, target_cols, mag_feat_names)
 
 @cache
-def get_pivot(mag_df):
+def get_pivot(mag_df=None):
+  mag_df = mag_df or read_magnetic_data()
   logger.info('Pivoting...')
   pivot = mag_df.pivot(index='x', columns='y', values='mag')
   grid = pivot.values
@@ -777,7 +793,7 @@ def progress_bar(value, endvalue, suffix='', bar_length=40):
   percent = float(value) / endvalue
   arrow = '-' * int(round(percent * bar_length)-1) + '>'
   spaces = ' ' * (bar_length - len(arrow))
-  s = '\rPercent: [%s] %.2f%%' % (arrow + spaces, percent * 100)
+  s = '\rProgress: [%s] %.2f%%' % (arrow + spaces, percent * 100)
   if suffix:
     s += ' (%s)' % suffix
   if percent == 1:
@@ -818,8 +834,8 @@ def extract_all_grids(
       cy = y + half_patch_size
       centroids.append((cx, cy))
       # TODO: grids are not the same size (e.g. for patch size 1000)
-      grid = extract_grid_from_pivot(pivot, cx, cy)
-      if n % 100 == 0:
+      grid = extract_grid_from_pivot(pivot, cx, cy, patch_size_m)
+      if n % 10 == 0:
         progress_bar(n, n_total, 'shape: %s' % str(grid.shape))
       vals = grid.flatten() if flatten else grid
       vals = func(vals) if func else vals
@@ -971,9 +987,8 @@ def do_autoencoder():
   import ipdb; ipdb.set_trace()
 
 @cache
-def _get_masks(grids, show=False):
+def _get_masks(grids, show=False, majority_only=False):
   rval = []
-  logger.info('Getting masks...')
   for i, grid in enumerate(grids):
     im = grid
     im -= im.min()
@@ -994,6 +1009,15 @@ def _get_masks(grids, show=False):
       vals.append(val)
 
     masks = [im > val for val in vals]
+
+    # add majority vote
+    pixel_counts = np.zeros(grid.shape)
+    for mask in masks:
+      pixel_counts += mask
+    majority_mask = pixel_counts > (len(masks) / 2)
+    masks.append(majority_mask)
+    filts.append('majority')
+
     mask_sizes = [m.sum() for m in masks]
     mask_tups = [(mask, size, name.split('_')[-1])
         for mask, size, name in zip(masks, mask_sizes, filts)]
@@ -1029,11 +1053,19 @@ def _get_mask_feats(grids, masks):
       feat_name = '%s_area' % name
       feats.setdefault(feat_name, [])
       feats[feat_name].append(area)
+      # sum
+      vals = grid[mask]
+      vals_sum = vals.sum()
+      feat_name = '%s_sum' % name
+      feats.setdefault(feat_name, [])
+      feats[feat_name].append(vals_sum)
+
       # TODO: more (e.g. convexity, num holes, num connected components...)
   return feats
 
 def do_blob_regression():
   grids, df, cols_by_type, target_cols = get_full_data()
+  logger.info('Getting masks...')
   masks = _get_masks(grids)
   mask_feats = _get_mask_feats(grids, masks)
   for name, vals in mask_feats.items():
@@ -1042,6 +1074,127 @@ def do_blob_regression():
   mask_feat_names = mask_feats.keys()
   regress(df, target_cols, mask_feat_names)
   import ipdb; ipdb.set_trace()
+
+
+# find the 10 highest density magnetic regions over 10,000m2 and less than 1,000,000m2
+# (100 x 100 to 1k x 1k metres)
+def do_blob_test():
+  # XXX NOT WORKING
+  raise
+
+  def _get_max_density_region(patch):
+    masks = _get_masks([patch])[0]
+    max_density = None
+    max_density_mask = None
+    for mask, size, name in masks:
+      labels = label(mask)
+      props = regionprops(labels)
+      for prop in props:
+        area = prop.area
+        vals = patch[mask]
+        density = vals.sum() / area
+        if max_density is None or density > max_density:
+          max_density = density
+          coords = prop.coords
+          rows, cols = zip(*coords)
+          max_density_mask = np.ones(mask.shape) * False
+          max_density_mask[rows, cols] = True
+    return max_density_mask, max_density
+
+  @cache
+  def _get_region_density_tups():
+    tups = []
+    logger.info('getting density tups...')
+    density_tups, centroids = extract_all_grids(func=_get_max_density_region, flatten=False)
+    for (mask, density), centroid in zip(density_tups, centroids):
+      tups.append((mask, density, centroid))
+    return tups
+
+  density_tups = _get_region_density_tups()
+  logger.info('sorting %s tups...' % len(density_tups))
+  density_tups.sort(key=lambda tup: tup[1] or 0, reverse=True)
+
+  pivot = get_pivot()
+
+  N = 100
+  for mask, density, centroid in density_tups:
+    if mask is None:
+      logger.info('mask was None')
+      continue
+    area = mask.sum()
+    logger.info('density: %s, centroid: %s, area: %s' % (
+      density, centroid, area))
+    if area < 5:
+      continue
+    cx, cy = centroid
+    grid = extract_grid_from_pivot(pivot, cx, cy, mask.shape[0])
+    import ipdb; ipdb.set_trace()
+    grid = grid - grid.min()
+    grid = grid / grid.max()
+    plt.subplot(1,2,1)
+    plt.imshow(mask)
+    plt.subplot(1,2,2)
+    plt.imshow(grid)
+    plt.show()
+    # TODO XXX
+
+  # https://pdfs.semanticscholar.org/1395/5c56b63bfda03224b11541a1d17d29025684.pdf
+
+def plot_mask_sum_vs_mkt_cap(annotate=False, show=False, save=True, do_log_target=True):
+  # TODO: refactor
+  IGNORE_LAT_LON = [(50.4386, -90.5323)]
+  grids, df, cols_by_type, target_cols = get_full_data()
+  lat_col, lon_col = get_lat_lon_cols(df)
+  ignore_idxs = [(lat, lon) in IGNORE_LAT_LON for lat, lon in zip(df[lat_col], df[lon_col])]
+  grids = [grid for grid, ignore in zip(grids, ignore_idxs) if not ignore]
+  logger.info('Getting masks...')
+  masks = _get_masks(grids, majority_only=True)
+  mask_feats = _get_mask_feats(grids, masks)
+  sums = mask_feats['majority_sum']
+  areas = mask_feats['majority_area']
+  for i, target_col in enumerate(target_cols):
+    isna = pd.isna(df[target_col].values)
+    iszero = df[target_col].values <= df[target_col].values.min()
+    target_vals = df[target_col]
+    target_vals = [v for v, na, ignore, zero in zip(target_vals, isna, ignore_idxs, iszero) if (not na) and (not ignore) and (not zero)]
+    target_vals = np.array(target_vals)
+    if do_log_target:
+      if any([t <= 0 for t in target_vals]):
+        target_vals -= target_vals.min()
+        target_vals += np.finfo(np.float32).eps
+      target_vals = np.log(target_vals)
+    this_sums = [s for s, na, ignore, zero in zip(sums, isna, ignore_idxs, iszero) if (not na) and (not ignore) and (not zero)]
+    this_areas = [s for s, na, ignore, zero in zip(areas, isna, ignore_idxs, iszero) if (not na) and (not ignore) and (not zero)]
+    plt.figure()
+    plt.scatter(this_sums, target_vals)
+    if do_log_target:
+      title = '%s (log) vs. Total High Magnetism' % target_col
+      ylabel = '%s (log)' % target_col
+    else:
+      title = '%s vs. Total High Magnetism' % target_col
+      ylabel = target_col
+    plt.ylabel(ylabel, fontsize=10)
+    plt.xlabel('Total High Magnetism', fontsize=10)
+    if annotate:
+      for target_val, magsum, area, lat, lon in zip(target_vals, this_sums, this_areas, df[lat_col], df[lon_col]):
+        plt.annotate('%s x %s' % (lat, lon), (magsum, target_val))
+        #plt.annotate('%s' % area, (magsum, target_val))
+    reg = LinearRegression()
+    X = np.array(this_sums).reshape(-1, 1)
+    reg.fit(X, target_vals)
+    score = reg.score(X, target_vals)
+    title = title + '\nR=' + str(score)
+    plt.title(title, fontsize=10)
+    plt.plot(X, reg.predict(X), color='k')
+    if show:
+      plt.show()
+    if save:
+      filename = 'target_vs_magnetism_%d.png' % i
+      if do_log_target:
+        filename = 'log_' + filename
+      logger.info('Saving to %s' % filename)
+      plt.savefig(filename)
+    # outlier: 50.4386 x -90.5323
 
 def main():
   parser = argparse.ArgumentParser()
@@ -1077,6 +1230,14 @@ def main():
       '-b',
       help='Do blob feature regression',
       action='store_true')
+  parser.add_argument(
+      '-t',
+      help='Do blob density test',
+      action='store_true')
+  parser.add_argument(
+      '-l',
+      help='Plot mask sum vs. market cap',
+      action='store_true')
 
   args = parser.parse_args()
 
@@ -1107,6 +1268,12 @@ def main():
 
   if args.b:
     do_blob_regression()
+
+  if args.t:
+    do_blob_test()
+
+  if args.l:
+    plot_mask_sum_vs_mkt_cap()
 
 if __name__ == '__main__':
   main()
