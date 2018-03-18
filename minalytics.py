@@ -75,9 +75,11 @@ DEBUG = True
 # Latitude and longitude of mining sites to ignore (outliers)
 IGNORE_LAT_LON_TUPS = [(50.4386, -90.5323)]
 
+# File to store total high magnetic values of mine sites
+MINE_MAG_VAL_PATH = 'mine-mag-vals.csv'
+
 import logging
-#log_format = '%(asctime)s : %(name)s : %(levelname)s : %(message)s'
-log_format = '%(asctime)s : %(message)s'
+log_format = '%(asctime)s : %(levelname)s : %(message)s'
 logging.basicConfig(format=log_format, level=logging.WARN)
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG if DEBUG else logging.INFO)
@@ -1162,7 +1164,7 @@ def _ignore_lat_lon(grids, df, cols_by_type, target_cols):
       grids = [g for i, g in enumerate(grids) if i != ignore_idx]
   return grids, df, cols_by_type, target_cols
 
-def plot_mask_sum_vs_mkt_cap(annotate=False, show=False, save=True, do_log_target=True):
+def plot_mask_sum_vs_mkt_cap(annotate=False, show=False, save=True, do_log_target=True, save_vals=True):
   # TODO: refactor
   grids, df, cols_by_type, target_cols = _ignore_lat_lon(*get_full_data())
   lat_col, lon_col = get_lat_lon_cols(df)
@@ -1225,6 +1227,15 @@ def plot_mask_sum_vs_mkt_cap(annotate=False, show=False, save=True, do_log_targe
       logger.info('Saving to %s' % filename)
       plt.savefig(filename)
     # outlier: 50.4386 x -90.5323
+
+  if save_vals:
+    logger.info('Saving mine magnetic values to %s' % MINE_MAG_VAL_PATH)
+    with open(MINE_MAG_VAL_PATH, 'w') as csvfile:
+      fieldnames = 'latitude longitude magsum'.split()
+      writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+      writer.writeheader()
+      for lat, lon, mag in zip(df[lat_col], df[lon_col], this_sums):
+        writer.writerow({'latitude': lat, 'longitude': lon, 'magsum': mag})
 
 def main():
   parser = argparse.ArgumentParser()
