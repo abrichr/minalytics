@@ -18,8 +18,6 @@ It performs the following tasks:
   - TODO: And lots more...
 
 TODO:
-  - add up total high magnetism values for each owner/operator, regress with
-    market cap
   - ANN features -> targets
   - CNN images -> targets
   - additional data dimensions
@@ -77,6 +75,14 @@ IGNORE_LAT_LON_TUPS = [(50.4386, -90.5323)]
 
 # File to store total high magnetic values of mine sites
 MINE_MAG_VAL_PATH = 'mine-mag-vals.csv'
+
+# Name of column to use to join mines
+# (only the one with the largest number of unique values will be used)
+OWNER_COLS = [
+    'Operator Name',
+    'Owner Name Owner 1',
+    'Owner Name Owner 1 2016'
+]
 
 import logging
 log_format = '%(asctime)s : %(levelname)s : %(message)s'
@@ -338,9 +344,13 @@ def convert_multi_to_onehot(df, cols_by_type):
   cols_by_type[ColType.MULTI].extend(new_cols)
 
 def convert_cat_to_onehot(df, cols_by_type,
-                          max_unique_vals_to_rows=MAX_UNIQUE_VALS_TO_ROWS):
+                          max_unique_vals_to_rows=MAX_UNIQUE_VALS_TO_ROWS,
+                          ignore_cols=None):
+  ignore_cols = ignore_cols or []
   num_cols_to_add = 0
   for col in sorted(cols_by_type[ColType.CAT]):
+    if col in ignore_cols:
+      continue
     vals = df[col]
     unique_vals = set(vals) - set([None])
     unique_vals_to_rows = 1.0 * len(unique_vals) / df.shape[0]
@@ -412,7 +422,7 @@ def get_target_cols(cols_by_type):
   return target_cols
 
 @cache
-def get_data():
+def get_data(keep_owner_cols=False):
   logger.info('Preparing data...')
   start_time = time.time()
 
@@ -429,7 +439,8 @@ def get_data():
   convert_multi_to_onehot(df, cols_by_type)
 
   logger.info('Converting categories...')
-  df = convert_cat_to_onehot(df, cols_by_type)
+  ignore_cols = OWNER_COLS if keep_owner_cols else []
+  df = convert_cat_to_onehot(df, cols_by_type, ignore_cols=ignore_cols)
 
   logger.info('Removing text columns...')
   remove_columns(df, cols_by_type[ColType.TEXT])
@@ -561,10 +572,10 @@ def get_mag_region(mag_df, pivot, row, lat_col, lon_col, box_size_m=MAG_PATCH_SI
   return grid
 
 @cache
-def get_full_data(max_rows=None):
+def get_full_data(max_rows=None, keep_owner_cols=False):
   mag_df = read_magnetic_data()
 
-  df, cols_by_type, target_cols = get_data()
+  df, cols_by_type, target_cols = get_data(keep_owner_cols=keep_owner_cols)
   lat_col, lon_col = get_lat_lon_cols(df.columns)
 
   min_lat = min(mag_df.lat)
@@ -1164,17 +1175,63 @@ def _ignore_lat_lon(grids, df, cols_by_type, target_cols):
       grids = [g for i, g in enumerate(grids) if i != ignore_idx]
   return grids, df, cols_by_type, target_cols
 
-def plot_mask_sum_vs_mkt_cap(annotate=False, show=False, save=True, do_log_target=True, save_vals=True):
+def _get_owner_col(df):
+  num_uniques = [df[col].unique().size for col in OWNER_COLS]
+  col_unique_tups = [(col, num_unique)
+      for col, num_unique in zip(OWNER_COLS, num_uniques)]
+  col_unique_tups.sort(key=lambda tup: tup[1])
+  owner_col = col_unique_tups[-1][0]
+  for col in OWNER_COLS:
+    if col != owner_col:
+      del df[col]
+  return owner_col
+
+def plot_mask_sum_vs_mkt_cap(
+    annotate=False,
+    show=False,
+    save=True,
+    do_log_target=False,
+    save_vals=False,
+    group_by_owner=False
+):
   # TODO: refactor
-  grids, df, cols_by_type, target_cols = _ignore_lat_lon(*get_full_data())
+  grids, df, cols_by_type, target_cols = _ignore_lat_lon(
+      *get_full_data(keep_owner_cols=group_by_owner))
   lat_col, lon_col = get_lat_lon_cols(df)
   logger.info('Getting masks...')
   masks = _get_grid_masks(grids, majority_only=True)
   mask_feats = _get_mask_feats(grids, masks)
   sums = mask_feats['majority_sum']
   areas = mask_feats['majority_area']
+  if group_by_owner:
+    logger.info('Grouping sums and areas by owner...')
+    owner_col = _get_owner_col(df)
+    owners = df[owner_col].sort_values()
+    sum_area_tups_by_owner = {}
+    for owner, _sum, area in zip(owners, sums, areas):
+      sum_area_tups_by_owner.setdefault(owner, [])
+      sum_area_tups_by_owner[owner].append((_sum, area))
+    sum_sums = []
+    area_sums = []
+    for owner in owners:
+      sum_area_tups = sum_area_tups_by_owner[owner]
+      sum_sum = sum([_sum for _sum, area in sum_area_tups])
+      area_sum = sum([area for _sum, area in sum_area_tups])
+      sum_sums.append(sum_sum)
+      area_sums.append(area_sum)
+    sums = sum_sums
+    areas = area_sums
   for i, target_col in enumerate(target_cols):
+    logger.debug('target_col: %s' % target_col)
     target_vals = df[target_col]
+    if group_by_owner:
+      targ_vals_by_owner = {}
+      for target_val, owner in zip(target_vals, owners):
+        targ_vals_by_owner.setdefault(owner, [])
+        targ_vals_by_owner[owner].append(target_val)
+      target_vals = np.array([
+        sum(v for v in targ_vals_by_owner[owner]if not pd.isna(v))
+        for owner in owners])
     isna = pd.isna(target_vals)
     iszero = target_vals <= target_vals.min()
     target_vals = [v for v, na, zero in zip(target_vals, isna, iszero)
@@ -1191,14 +1248,13 @@ def plot_mask_sum_vs_mkt_cap(annotate=False, show=False, save=True, do_log_targe
                   if (not na) and (not zero)]
     plt.figure()
     plt.scatter(this_sums, target_vals)
-    if do_log_target:
-      title = '%s (log) vs. Total High Magnetism' % target_col
-      ylabel = '%s (log)' % target_col
-    else:
-      title = '%s vs. Total High Magnetism' % target_col
-      ylabel = target_col
+    ylabel = '%s%s%s' % (target_col,
+        ' (log)' if do_log_target else '',
+        ' (grouped)' if group_by_owner else '')
+    xlabel = 'Total High Magnetism'
+    title = '%s vs. %s' % (ylabel, xlabel)
     plt.ylabel(ylabel, fontsize=10)
-    plt.xlabel('Total High Magnetism', fontsize=10)
+    plt.xlabel(xlabel, fontsize=10)
     if annotate:
       for target_val, magsum, area, lat, lon in zip(
           target_vals, this_sums, this_areas, df[lat_col], df[lon_col]):
@@ -1215,18 +1271,18 @@ def plot_mask_sum_vs_mkt_cap(annotate=False, show=False, save=True, do_log_targe
     cross_val_scores = model_selection.cross_val_score(reg, X, target_vals, cv=cv)
     cross_val_score = cross_val_scores.mean()
 
-    title = '%s\nR=%s\nR_cv=%s' % (title, score, cross_val_score)
+    title = '%s\nR2=%.4f\nR2_cv=%.4f' % (title, score, cross_val_score)
     plt.title(title, fontsize=10)
     plt.plot(X, reg.predict(X), color='k')
     if show:
       plt.show()
     if save:
-      filename = 'target_vs_magnetism_%d.png' % i
-      if do_log_target:
-        filename = 'log_' + filename
+      filename = '%s%starget_vs_magnetism_%d.png' % (
+          'grouped_' if group_by_owner else '',
+          'log_' if do_log_target else '',
+          i)
       logger.info('Saving to %s' % filename)
       plt.savefig(filename)
-    # outlier: 50.4386 x -90.5323
 
   if save_vals:
     logger.info('Saving mine magnetic values to %s' % MINE_MAG_VAL_PATH)
@@ -1236,6 +1292,9 @@ def plot_mask_sum_vs_mkt_cap(annotate=False, show=False, save=True, do_log_targe
       writer.writeheader()
       for lat, lon, mag in zip(df[lat_col], df[lon_col], this_sums):
         writer.writerow({'latitude': lat, 'longitude': lon, 'magsum': mag})
+
+def plot_mask_sum_vs_mkt_cap_grouped():
+  plot_mask_sum_vs_mkt_cap(group_by_owner=True)
 
 def main():
   parser = argparse.ArgumentParser()
@@ -1279,6 +1338,10 @@ def main():
       '-l',
       help='Plot mask sum vs. market cap',
       action='store_true')
+  parser.add_argument(
+      '-g',
+      help='Plot mask sum vs. market cap (grouped by owner)',
+      action='store_true')
 
   args = parser.parse_args()
 
@@ -1315,6 +1378,9 @@ def main():
 
   if args.l:
     plot_mask_sum_vs_mkt_cap()
+
+  if args.g:
+    plot_mask_sum_vs_mkt_cap_grouped()
 
 if __name__ == '__main__':
   main()
