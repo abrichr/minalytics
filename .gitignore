@@ -1,0 +1,7 @@
+.cache
+data
+out
+lit
+*.pyc
+*.swp
+*.swo
