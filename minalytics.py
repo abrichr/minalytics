@@ -55,10 +55,10 @@ MAX_UNIQUE_VALS_TO_ROWS = 0.01
 
 # Path to Excel workbook
 #EXCEL_WORKBOOK_PATH = 'snlworkbook_Combined.xls'
-EXCEL_WORKBOOK_PATH = 'snlworkbook_Combined_fixed.xls'
+EXCEL_WORKBOOK_PATH = 'data/snlworkbook_Combined_fixed.xls'
 
 # Path to magnetic grid file (text)
-MAGNETIC_GRID_PATH = '200 m mag deg.dat'
+MAGNETIC_GRID_PATH = 'data/200 m mag deg.dat'
 
 # Size of patch of magnetic data in metres
 MAG_PATCH_SIZE_M = 10000
@@ -88,7 +88,7 @@ IGNORE_LAT_LON_TUPS = [
 ]
 
 # File to store total high magnetic values of mine sites
-MINE_MAG_VAL_PATH = 'mine-mag-vals.csv'
+MINE_MAG_VAL_PATH = 'out/mine-mag-vals.csv'
 
 # Property ID column
 ID_COL = 'Property ID'
@@ -779,7 +779,7 @@ def display_full_magnetic_grid(save=True, show=True, stride=5):
   _display(_contours,  True,  'Magnetic Contours (log)',  4)
 
   if save:
-    filename = 'grid.png'
+    filename = 'out/grid.png'
     logger.info('Saving to file %s...' % filename)
     plt.savefig(filename, dpi=dpi[0])
   if show:
@@ -816,7 +816,7 @@ def display_magnetic_grids(save=True, show=False):
     plt.suptitle('Magnetic Intensities at lat: %s, lon: %s' % (lat, lon))
 
     if save:
-      filename = 'grid_%04d_%s_%s.png' % (i, lat, lon)
+      filename = 'out/grid_%04d_%s_%s.png' % (i, lat, lon)
       logger.info("Saving to file %s" % filename)
       plt.savefig(filename)
     if show:
@@ -939,7 +939,7 @@ def _display_pca(pca, name, save=True, show=False, n_components=10):
     if show:
       plt.show()
     if save:
-      filename = '%s_%d.png' % (name, i)
+      filename = 'out/%s_%d.png' % (name, i)
       logger.info('Saving to %s...' % filename)
       plt.savefig(filename, dpi=min(grid.shape))
   import ipdb; ipdb.set_trace()
@@ -1299,7 +1299,7 @@ def plot_mask_sum_vs_mkt_cap(
     if do_log_target:
       if any([t <= 0 for t in target_vals]):
         target_vals -= target_vals.min()
-        target_vals += EPS 
+        target_vals += EPS
       target_vals = np.log(target_vals)
     this_sums = np.array([s for s, na, zero in zip(sums, isna, iszero)
                          if (not na) and (not zero)])
@@ -1341,7 +1341,7 @@ def plot_mask_sum_vs_mkt_cap(
     if show:
       plt.show()
     if save:
-      filename = '%s%starget_vs_magnetism_%d.png' % (
+      filename = 'out/%s%starget_vs_magnetism_%d.png' % (
           'grouped_' if group_by_owner else '',
           'log_' if do_log_target else '',
           i)
