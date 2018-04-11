@@ -31,6 +31,7 @@ MAX_EMPTY_RATIO = 0.7
 # Any column whose name contains at least one of these words (case-insensitive)
 # is treated as a target for the regression.
 TARGET_COL_TERMS = ['capitalization', 'value']
+# TODO: ignore 'total deal value (completion)'
 
 # If the Pearson Correlation Coefficient between a data column and any target
 # column is greater than this value, it is ignored.
@@ -53,7 +54,8 @@ MIN_DUP_PART_COUNT = 2
 MAX_UNIQUE_VALS_TO_ROWS = 0.01
 
 # Path to Excel workbook
-EXCEL_WORKBOOK_PATH = 'snlworkbook_Combined.xls'
+#EXCEL_WORKBOOK_PATH = 'snlworkbook_Combined.xls'
+EXCEL_WORKBOOK_PATH = 'snlworkbook_Combined_fixed.xls'
 
 # Path to magnetic grid file (text)
 MAGNETIC_GRID_PATH = '200 m mag deg.dat'
@@ -68,13 +70,28 @@ MAG_STRIDE_SIZE_M = 5000
 NUM_PCA_COMPONENTS = 10
 
 # Set to True for verbose logging
-DEBUG = True
+DEBUG = False
 
 # Latitude and longitude of mining sites to ignore (outliers)
-IGNORE_LAT_LON_TUPS = [(50.4386, -90.5323)]
+IGNORE_LAT_LON_TUPS = [
+    (50.4386, -90.5323),
+    #(50.47099, -95.54623),  # this one results in no mask feats
+    #(48.82997, -94.00014),
+    #(48.6333, -90.0666),
+    #(54.92991, -98.6328),
+    #(51.015, -92.81),
+    #(55.70038, -105.0701),
+    #(59.49393, -91.46868),
+    #(54.81535, -96.23095),
+    #(50.4725, -95.0691),
+    #(49.79008, -87.81143)
+]
 
 # File to store total high magnetic values of mine sites
 MINE_MAG_VAL_PATH = 'mine-mag-vals.csv'
+
+# Property ID column
+ID_COL = 'Property ID'
 
 # Name of column to use to join mines
 # (only the one with the largest number of unique values will be used)
@@ -128,16 +145,19 @@ def myrepr(arg):
 cache = percache.Cache(".cache", livesync=True, repr=myrepr)
 
 PY3 = sys.version_info >= (3, 0)
+EPS = np.finfo(np.float32).eps
 
 @cache
-def load_dataframe():
-  data_fname = EXCEL_WORKBOOK_PATH
+def load_dataframe(data_fname=EXCEL_WORKBOOK_PATH, max_rows=None):
+  logger.info('Reading workbook: %s' % data_fname)
   wb = open_workbook(data_fname)
 
   sheet = wb.sheets()[0]
   col_names = []
   values = []
-  for row in range(sheet.nrows):
+  for i_row, row in enumerate(range(sheet.nrows)):
+    if max_rows and i_row >= max_rows:
+      break
     row_values = []
     set_col_names = not bool(col_names)
     for col in range(sheet.ncols):
@@ -415,9 +435,9 @@ def remove_target_correlations(df, corr_thresh=CORR_THRESH):
   for col in cols_to_remove:
     del df[col]
 
-def get_target_cols(cols_by_type):
+def get_target_cols(cols_by_type, col_terms=TARGET_COL_TERMS):
   target_cols = [col for col in cols_by_type[ColType.NUM]
-                 if any(word in col.lower() for word in TARGET_COL_TERMS)]
+                 if any(word in col.lower() for word in col_terms)]
   logger.info('target_cols:\n\t%s' % '\n\t'.join(target_cols))
   return target_cols
 
@@ -573,31 +593,34 @@ def get_mag_region(mag_df, pivot, row, lat_col, lon_col, box_size_m=MAG_PATCH_SI
 
 @cache
 def get_full_data(max_rows=None, keep_owner_cols=False):
-  mag_df = read_magnetic_data()
-
   df, cols_by_type, target_cols = get_data(keep_owner_cols=keep_owner_cols)
   lat_col, lon_col = get_lat_lon_cols(df.columns)
 
+  mag_df = read_magnetic_data()
   min_lat = min(mag_df.lat)
   max_lat = max(mag_df.lat)
   min_lon = min(mag_df.lon)
   max_lon = max(mag_df.lon)
-
   logger.debug('min_lat: %s' % min_lat)
   logger.debug('max_lat: %s' % max_lat)
   logger.debug('min_lon: %s' % min_lon)
   logger.debug('max_lon: %s' % max_lon)
 
   try:
-    logger.info('removing rows without lat/lon...')
+    logger.info('Removing rows without lat/lon...')
+    n0 = len(df)
     df = df[pd.notnull(df[lat_col]) &
             pd.notnull(df[lon_col])]
-    logger.info('removing out of bounds...')
+    n1 = len(df)
+    logger.info('Removed %d rows without lat/lon' % (n0 - n1))
+    logger.info('Removing out of bounds...')
     df = df[(df[lat_col] >= min_lat) &
             (df[lat_col] <= max_lat) &
             (df[lon_col] >= min_lon) &
             (df[lon_col] <= max_lon)]
-    logger.info('resetting index...')
+    n2 = len(df)
+    logger.info('Removed %d rows out of bounds' % (n1 - n2))
+    logger.info('Resetting index...')
     df = df.reset_index()
   except Exception as e:
     logger.warn('e:', e)
@@ -698,7 +721,7 @@ def do_magnetic_regression():
 
 @cache
 def get_pivot(mag_df=None):
-  mag_df = mag_df or read_magnetic_data()
+  mag_df = mag_df if mag_df is not None else read_magnetic_data()
   logger.info('Pivoting...')
   pivot = mag_df.pivot(index='x', columns='y', values='mag')
   grid = pivot.values
@@ -1172,7 +1195,7 @@ def _ignore_lat_lon(grids, df, cols_by_type, target_cols):
     ignore_idxs = np.nonzero(ignore_mask)
     logger.debug('ignore_idxs: %s' % ignore_idxs)
     for ignore_idx in ignore_idxs:  # should be only one
-      grids = [g for i, g in enumerate(grids) if i != ignore_idx]
+      grids = [g for i, g in enumerate(grids) if i not in ignore_idx]
   return grids, df, cols_by_type, target_cols
 
 def _get_owner_col(df):
@@ -1186,13 +1209,24 @@ def _get_owner_col(df):
       del df[col]
   return owner_col
 
+def _remove_na(vals):
+  isna = pd.isna(vals)
+  vals = [v for v, na in zip(vals, isna) if not na]
+  return np.array(vals)
+
 def plot_mask_sum_vs_mkt_cap(
     annotate=False,
     show=False,
     save=True,
+    # TODO: plot all four combinations
     do_log_target=False,
-    save_vals=False,
-    group_by_owner=False
+    do_log_sum=False,
+    save_vals=True,
+    group_by_owner=False,
+    max_total_high_magnetism=None,  #0.5*10**7
+    min_by_targ={
+      'Total Deal Value (Announcement) Deal 1 (Reported)': 250
+    }
 ):
   # TODO: refactor
   grids, df, cols_by_type, target_cols = _ignore_lat_lon(
@@ -1201,37 +1235,62 @@ def plot_mask_sum_vs_mkt_cap(
   logger.info('Getting masks...')
   masks = _get_grid_masks(grids, majority_only=True)
   mask_feats = _get_mask_feats(grids, masks)
+  #logger.debug('mask_feats: %s' % pformat(mask_feats))
   sums = mask_feats['majority_sum']
+  #TODO: get rid of area
   areas = mask_feats['majority_area']
   if group_by_owner:
     logger.info('Grouping sums and areas by owner...')
     owner_col = _get_owner_col(df)
     owners = df[owner_col].sort_values()
+    unique_owners = owners.unique()
     sum_area_tups_by_owner = {}
     for owner, _sum, area in zip(owners, sums, areas):
       sum_area_tups_by_owner.setdefault(owner, [])
       sum_area_tups_by_owner[owner].append((_sum, area))
     sum_sums = []
     area_sums = []
-    for owner in owners:
+    for owner in unique_owners:
       sum_area_tups = sum_area_tups_by_owner[owner]
+      N = len(sum_area_tups)
       sum_sum = sum([_sum for _sum, area in sum_area_tups])
       area_sum = sum([area for _sum, area in sum_area_tups])
-      sum_sums.append(sum_sum)
-      area_sums.append(area_sum)
+      sum_sums.append(sum_sum / N)
+      area_sums.append(area_sum / N)
     sums = sum_sums
     areas = area_sums
+  df_orig = df
   for i, target_col in enumerate(target_cols):
-    logger.debug('target_col: %s' % target_col)
-    target_vals = df[target_col]
+    df = df_orig
+    logger.info('target_col: %s' % target_col)
+    if target_col in min_by_targ:
+      targ_min = min_by_targ[target_col]
+      logger.info('targ_min: %s' % targ_min)
+      df = df[df[target_col] >= targ_min]
+    target_vals = _remove_na(df[target_col])
+    max_target_val = max(target_vals)
+    min_target_val = min(target_vals)
+    logger.info('min: %s, max: %s' % (min_target_val, max_target_val))
     if group_by_owner:
       targ_vals_by_owner = {}
       for target_val, owner in zip(target_vals, owners):
         targ_vals_by_owner.setdefault(owner, [])
-        targ_vals_by_owner[owner].append(target_val)
+        if not pd.isna(target_val):
+          targ_vals_by_owner[owner].append(target_val)
+      target_vals = []
+      for owner in unique_owners:
+        targ_vals = targ_vals_by_owner[owner]
+        N = len(targ_vals)
+        val = sum(targ_vals) / N if N is not 0 else 0
+        target_vals.append(val)
+      target_vals = np.array(target_vals)
+      '''
+      import ipdb; ipdb.set_trace()
       target_vals = np.array([
-        sum(v for v in targ_vals_by_owner[owner]if not pd.isna(v))
-        for owner in owners])
+        sum(v)/len(targ_vals_by_owner[owner])
+        for v in targ_vals_by_owner[owner]
+        for owner in unique_owners])
+      '''
     isna = pd.isna(target_vals)
     iszero = target_vals <= target_vals.min()
     target_vals = [v for v, na, zero in zip(target_vals, isna, iszero)
@@ -1240,12 +1299,18 @@ def plot_mask_sum_vs_mkt_cap(
     if do_log_target:
       if any([t <= 0 for t in target_vals]):
         target_vals -= target_vals.min()
-        target_vals += np.finfo(np.float32).eps
+        target_vals += EPS 
       target_vals = np.log(target_vals)
-    this_sums = [s for s, na, zero in zip(sums, isna, iszero)
-                 if (not na) and (not zero)]
-    this_areas = [s for s, na, zero in zip(areas, isna, iszero)
-                  if (not na) and (not zero)]
+    this_sums = np.array([s for s, na, zero in zip(sums, isna, iszero)
+                         if (not na) and (not zero)])
+    if do_log_sum:
+      this_sums -= this_sums.min()
+      this_sums += EPS
+      this_sums = np.log(this_sums)
+    if max_total_high_magnetism is not None:
+      keep_idxs = np.argwhere(this_sums > max_total_high_magnetism)
+      this_sums = [this_sums[i] for i in keep_idxs]
+      target_vals = [target_vals[i] for i in keep_idxs]
     plt.figure()
     plt.scatter(this_sums, target_vals)
     ylabel = '%s%s%s' % (target_col,
@@ -1256,10 +1321,9 @@ def plot_mask_sum_vs_mkt_cap(
     plt.ylabel(ylabel, fontsize=10)
     plt.xlabel(xlabel, fontsize=10)
     if annotate:
-      for target_val, magsum, area, lat, lon in zip(
-          target_vals, this_sums, this_areas, df[lat_col], df[lon_col]):
+      for target_val, magsum, lat, lon in zip(
+          target_vals, this_sums, df[lat_col], df[lon_col]):
         plt.annotate('%s x %s' % (lat, lon), (magsum, target_val))
-        #plt.annotate('%s' % area, (magsum, target_val))
 
     reg = LinearRegression()
     X = np.array(this_sums).reshape(-1, 1)
@@ -1287,11 +1351,11 @@ def plot_mask_sum_vs_mkt_cap(
   if save_vals:
     logger.info('Saving mine magnetic values to %s' % MINE_MAG_VAL_PATH)
     with open(MINE_MAG_VAL_PATH, 'w') as csvfile:
-      fieldnames = 'latitude longitude magsum'.split()
+      fieldnames = 'id latitude longitude magsum'.split()
       writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
       writer.writeheader()
-      for lat, lon, mag in zip(df[lat_col], df[lon_col], this_sums):
-        writer.writerow({'latitude': lat, 'longitude': lon, 'magsum': mag})
+      for _id, lat, lon, mag in zip(df[ID_COL], df[lat_col], df[lon_col], this_sums):
+        writer.writerow({'id': int(_id), 'latitude': lat, 'longitude': lon, 'magsum': mag})
 
 def plot_mask_sum_vs_mkt_cap_grouped():
   plot_mask_sum_vs_mkt_cap(group_by_owner=True)
