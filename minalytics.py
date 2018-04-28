@@ -60,6 +60,9 @@ EXCEL_WORKBOOK_PATH = 'data/snlworkbook_Combined_fixed.xls'
 # Path to magnetic grid file (text)
 MAGNETIC_GRID_PATH = 'data/200 m mag deg.dat'
 
+# Path to magnetic grid file (binary)
+BINARY_MAGNETIC_GRID_PATH = 'data/d950396/Canada - 200m - MAG - Residual Total Field - Composante residuelle.grd.gxf'
+
 # Size of patch of magnetic data in metres
 MAG_PATCH_SIZE_M = 10000
 
@@ -70,7 +73,7 @@ MAG_STRIDE_SIZE_M = 5000
 NUM_PCA_COMPONENTS = 10
 
 # Set to True for verbose logging
-DEBUG = False
+DEBUG = True
 
 # Latitude and longitude of mining sites to ignore (outliers)
 IGNORE_LAT_LON_TUPS = [
@@ -100,6 +103,8 @@ OWNER_COLS = [
     'Owner Name Owner 1',
     'Owner Name Owner 1 2016'
 ]
+
+MAG_ARRAY_PATH = 'out/mag-array.npy'
 
 import logging
 log_format = '%(asctime)s : %(levelname)s : %(message)s'
@@ -142,7 +147,7 @@ def myrepr(arg):
   else:
     return repr(arg)
 
-cache = percache.Cache(".cache", livesync=True, repr=myrepr)
+cache = percache.Cache(".cache__", livesync=True, repr=myrepr)
 
 PY3 = sys.version_info >= (3, 0)
 EPS = np.finfo(np.float32).eps
@@ -521,8 +526,177 @@ def do_simple_regression():
 
   regress(df, target_cols)
 
-@cache
+#@cache
 def read_magnetic_data(
+    magnetic_grid_path=BINARY_MAGNETIC_GRID_PATH,
+    stride=None
+):
+
+  from osgeo import gdal, osr
+  import georasters as gr
+  if not os.path.exists(MAG_ARRAY_PATH):
+    logger.debug('gdal.Open()')
+    raster = gdal.Open(magnetic_grid_path)
+    logger.debug('raster.GetGeoTransform()')
+    geotransform = raster.GetGeoTransform()
+    logger.debug('raster.ReadAsArray()')
+    arr = raster.ReadAsArray()
+    logger.debug('np.save(), MAG_ARRAY_PATH=%s' % MAG_ARRAY_PATH)
+    np.save(MAG_ARRAY_PATH, arr)
+
+  '''
+  ‘r’   Open existing file for reading only.
+  ‘r+’	Open existing file for reading and writing.
+  ‘w+’	Create or overwrite existing file for reading and writing.
+  ‘c’	  Copy-on-write: assignments affect data in memory, but changes
+        are not saved to disk. The file on disk is read-only.
+  '''
+  logger.debug('np.load(), MAG_ARRAY_PATH=%s' % MAG_ARRAY_PATH)
+  arr = np.load(MAG_ARRAY_PATH, mmap_mode='r')
+  #logger.debug('np.memmap()')
+  #fp = np.memmap(arr, dtype=arr.dtype, mode='w+', shape=arr.shape)
+  logger.debug('pd.DataFrame()')
+  df = pd.DataFrame(arr, copy=False)
+
+  #graster = gr.GeoRaster(arr, geotransform)
+  import ipdb; ipdb.set_trace()
+
+  fileformat = "GTiff"
+  driver = gdal.GetDriverByName(fileformat)
+  metadata = driver.GetMetadata()
+  if metadata.get(gdal.DCAP_CREATE) == "YES":
+    print("Driver {} supports Create() method.".format(fileformat))
+
+  if metadata.get(gdal.DCAP_CREATE) == "YES":
+    print("Driver {} supports CreateCopy() method.".format(fileformat))
+
+  dst_ds = driver.CreateCopy('out.gdal', raster, strict=0,
+                                 options=["TILED=YES", "COMPRESS=PACKBITS"])
+  import ipdb; ipdb.set_trace()
+
+  # get raster info
+  print("Driver: {}/{}".format(raster.GetDriver().ShortName,
+                               raster.GetDriver().LongName))
+  print("Size is {} x {} x {}".format(raster.RasterXSize,
+                                      raster.RasterYSize,
+                                      raster.RasterCount))
+  print("Projection is {}".format(raster.GetProjection()))
+  geotransform = raster.GetGeoTransform()
+  if geotransform:
+    print("Origin = ({}, {})".format(geotransform[0], geotransform[3]))
+    print("Pixel Size = ({}, {})".format(geotransform[1], geotransform[5]))
+
+  # fetch raster band
+  band = raster.GetRasterBand(1)
+  print("Band Type={}".format(gdal.GetDataTypeName(band.DataType)))
+
+  if band.GetMinimum() is None or band.GetMaximum()is None:
+    band.ComputeStatistics(0)
+    print("Statistics computed.")
+
+  # Fetch metadata for the band
+  metadata = band.GetMetadata()
+  print('metadata: %s' % str(metadata))
+
+  # Print only selected metadata:
+  print ("[ NO DATA VALUE ] = ", band.GetNoDataValue()) # none
+  print ("[ MIN ] = ", band.GetMinimum())
+  print ("[ MAX ] = ", band.GetMaximum())
+      
+  min = band.GetMinimum()
+  max = band.GetMaximum()
+  print('min: %s, max: %s' % (min, max))
+  
+  if 0:
+    (min,max) = band.ComputeRasterMinMax(False)
+    #print("Computed Min={:.3f}, Max={:.3f}".format(min,max))
+    print('computed min: %s, max: %s' % (min, max))
+      
+  if band.GetOverviewCount() > 0:
+    print("Band has {} overviews".format(band.GetOverviewCount()))
+      
+  if band.GetRasterColorTable():
+    print("Band has a color table with {} entries".format(band.GetRasterColorTable().GetCount()))
+
+  if 0:
+    # read raster data
+    scanline = band.ReadRaster(xoff=0, yoff=0,
+                               xsize=band.XSize, ysize=1,
+                               buf_xsize=band.XSize, buf_ysize=1,
+                               buf_type=gdal.GDT_Float32)
+    import struct
+    tuple_of_floats = struct.unpack('f' * band.XSize, scanline)
+
+  # convert to lat/lon
+  # https://svn.osgeo.org/gdal/trunk/gdal/swig/python/samples/tolatlong.py
+  srs = osr.SpatialReference()
+  srs.ImportFromWkt(raster.GetProjection())
+  geotransform = raster.GetGeoTransform()
+  originX = geotransform[0]
+  originY = geotransform[3]
+  srsLatLong = srs.CloneGeogCS()
+  ct = osr.CoordinateTransformation(srs, srsLatLong)
+  # http://gdal.org/python/
+  # http://www.gdal.org/index.html
+  # https://automating-gis-processes.github.io/
+  print('transformed origin: %s' % str(ct.TransformPoint(originX,originY)))
+
+  # from http://www.gdal.org/gdal_datamodel.html:
+  '''
+In case of north up images, the GT(2) and GT(4) coefficients are zero, and the GT(1) is pixel width, and GT(5) is pixel height. The (GT(0),GT(3)) position is the top left corner of the top left pixel of the raster.
+
+Note that the pixel/line coordinates in the above are from (0.0,0.0) at the top left corner of the top left pixel to (width_in_pixels,height_in_pixels) at the bottom right corner of the bottom right pixel. The pixel/line location of the center of the top left pixel would therefore be (0.5,0.5).
+
+
+  '''
+
+  offset = band.GetOffset()  # 0
+  scale = band.GetScale()  # 1
+  print('offset: %s, scale: %s', (offset, scale))
+  if offset != 0 or scale != 1:
+    raise
+    # Units value = (raw value * scale) + offset
+
+
+
+  # Read raster data as numeric array from GDAL Dataset
+  print('raster.ReadAsArray()')
+  rasterArray = raster.ReadAsArray()
+  print('type(rasterArray): %s' % type(rasterArray))
+
+  # Get nodata value from the GDAL band object
+  #nodata = band.GetNoDataValue()
+
+  # Create a masked array for making calculations without nodata values
+  #print('np.ma.masked_equal()')
+  #maskedRasterArray = np.ma.masked_equal(rasterArray, nodata)
+  #print('type(maskedRasterArray): %s' % type(maskedRasterArray))
+
+  # Check again array statistics
+  #mn = rasterArray.min()
+  #print('mn: %s' % mn)
+
+  frame_data = []
+  GT = geotransform  #raster.GetGeoTransform()
+  print('creating frame_data...')
+  n_rows = raster.RasterYSize
+  n_cols = raster.RasterXSize
+  for y, row in enumerate(rasterArray):
+    print('row %d of %d' % (y, n_rows))
+    for x, val in enumerate(row):
+      #print('\tcol %d of %d' % (x, n_cols))
+      lon = GT[0] + x * GT[1] + y * GT[2]
+      lat = GT[3] + x * GT[4] + y * GT[5]
+      frame_row = [x, y, val, lat, lon]
+      frame_data.append(frame_row)
+
+  print('pd.DataFrame()')
+  df = pd.DataFrame(frame_data)
+
+  import ipdb; ipdb.set_trace()
+
+@cache
+def read_magnetic_data__old(
     magnetic_grid_path=MAGNETIC_GRID_PATH,
     stride=None
 ):
@@ -1224,13 +1398,18 @@ def plot_mask_sum_vs_mkt_cap(
     save_vals=True,
     group_by_owner=False,
     max_total_high_magnetism=None,  #0.5*10**7
+    ignore_lat_lon_tups=False,
     min_by_targ={
       'Total Deal Value (Announcement) Deal 1 (Reported)': 250
     }
 ):
   # TODO: refactor
-  grids, df, cols_by_type, target_cols = _ignore_lat_lon(
-      *get_full_data(keep_owner_cols=group_by_owner))
+  if ignore_lat_lon:
+    grids, df, cols_by_type, target_cols = _ignore_lat_lon(
+        *get_full_data(keep_owner_cols=group_by_owner))
+  else:
+    grids, df, cols_by_type, target_cols = get_full_data(
+        keep_owner_cols=group_by_owner)
   lat_col, lon_col = get_lat_lon_cols(df)
   logger.info('Getting masks...')
   masks = _get_grid_masks(grids, majority_only=True)
@@ -1360,6 +1539,17 @@ def plot_mask_sum_vs_mkt_cap(
 def plot_mask_sum_vs_mkt_cap_grouped():
   plot_mask_sum_vs_mkt_cap(group_by_owner=True)
 
+def print_stats():
+  mag_df = read_magnetic_data()
+  min_lat = min(mag_df.lat)
+  max_lat = max(mag_df.lat)
+  min_lon = min(mag_df.lon)
+  max_lon = max(mag_df.lon)
+  logger.info('min_lat: %s' % min_lat)
+  logger.info('max_lat: %s' % max_lat)
+  logger.info('min_lon: %s' % min_lon)
+  logger.info('max_lon: %s' % max_lon)
+
 def main():
   parser = argparse.ArgumentParser()
   parser.add_argument(
@@ -1406,6 +1596,14 @@ def main():
       '-g',
       help='Plot mask sum vs. market cap (grouped by owner)',
       action='store_true')
+  parser.add_argument(
+      '--stats',
+      help='Print stats on data',
+      action='store_true')
+  parser.add_argument(
+      '--magnetic',
+      help='Read geomagnetic data',
+      action='store_true')
 
   args = parser.parse_args()
 
@@ -1445,6 +1643,13 @@ def main():
 
   if args.g:
     plot_mask_sum_vs_mkt_cap_grouped()
+
+  if args.stats:
+    print_stats()
+
+  if args.magnetic:
+    data = read_magnetic_data()
+
 
 if __name__ == '__main__':
   main()
