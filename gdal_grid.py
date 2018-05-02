@@ -123,7 +123,8 @@ class GDALGrid(object):
         Path to projection file.
 
     """
-    def __init__(self, grid_file, prj_file=None, min_val_replacement=None):
+    def __init__(self, grid_file, prj_file=None,
+                 min_val_replacement=None, shift_to_zero=True):
         if isinstance(grid_file, gdal.Dataset):
             self.dataset = grid_file
         else:
@@ -136,10 +137,14 @@ class GDALGrid(object):
         #   #ZMINIMUM
         #   -6586.06543
         #   #ZMAXIMUM
-        #   728998  
+        #   728998
         # but these values do not appear to be accessible from GDAL Python
+        # TODO: read these values directly from file
         if min_val_replacement is not None:
-            self.arr[self.arr == self.arr.min()] = min_val_replacement 
+            self.arr[self.arr == self.arr.min()] = min_val_replacement
+
+        if shift_to_zero:
+            self.arr -= self.arr.min()
 
         # set projection object
         if prj_file is not None:
@@ -154,6 +159,11 @@ class GDALGrid(object):
         self.projection.AutoIdentifyEPSG()
         # set affine from geotransform
         self.affine = Affine.from_gdal(*self.dataset.GetGeoTransform())
+
+    def __repr__(self):
+        # hack to cache results of functions whose arguments include a GDALGrid
+        # TODO: compute file hash from filename
+        return '%s\n%s' % (self.dataset.GetFileList(), repr(self.arr))
 
     @property
     def geotransform(self):
