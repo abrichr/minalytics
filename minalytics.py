@@ -591,13 +591,13 @@ def get_mag_region(mag_df, pivot, row, lat_col, lon_col, box_size_m=MAG_PATCH_SI
     row = mag_df.loc[argmin]
     cx = row.x
     cy = row.y
-    grid = extract_grid_from_pivot(pivot, cx, cy, box_size_m)
+    patch = extract_patch_from_pivot(pivot, cx, cy, box_size_m)
   except Exception as e:
     logger.warn('e: %s' % e)
     import ipdb; ipdb.set_trace()
 
-  logger.info('grid.shape: %s' % str(grid.shape))
-  return grid
+  logger.info('patch.shape: %s' % str(patch.shape))
+  return patch
 
 def get_patch_from_grid(grid, lon, lat, patch_size_m=MAG_PATCH_SIZE_M):
   logger.debug('get_patch_from_grid() lon: %s, lat: %s' % (lon, lat))
@@ -612,14 +612,14 @@ def get_patch_from_grid(grid, lon, lat, patch_size_m=MAG_PATCH_SIZE_M):
     logger.debug('No patch at (lon, lat): (%s, %s)' % (lon, lat))
     return None
 
-  dx = int(patch_size_m / abs(grid.dx))
-  dy = int(patch_size_m / abs(grid.dy))
+  cols = int(patch_size_m / abs(grid.dx))
+  rows = int(patch_size_m / abs(grid.dy))
   arr = grid.arr
 
-  y0 = max(cy-dy, 0)
-  y1 = min(cy+dy, arr.shape[0])
-  x0 = max(cx-dx, 0)
-  x1 = min(cx+dx, arr.shape[1])
+  y0 = max(cy-rows, 0)
+  y1 = min(cy+rows, arr.shape[0])
+  x0 = max(cx-cols, 0)
+  x1 = min(cx+cols, arr.shape[1])
 
   patch = arr[x0:x1, y0:y1]
   logger.debug('patch.size: %s' % str(patch.size))
@@ -724,7 +724,7 @@ def get_full_data__old(max_rows=None, keep_owner_cols=False):
     import ipdb; ipdb.set_trace()
 
   #df['mag'] = None  # set dtype to Object
-  grids = []
+  patches = []
   pivot = get_pivot(mag_df)
   for i, row in df.iterrows():
     if max_rows and i > max_rows:
@@ -733,15 +733,15 @@ def get_full_data__old(max_rows=None, keep_owner_cols=False):
     try:
       mag_region = get_mag_region(mag_df, pivot, row, lat_col, lon_col)
       #df.at[0, 'mag'] = mag_region
-      grids.append(mag_region)
+      patches.append(mag_region)
     except Exception as e:
       logger.warn('e:', e)
       import ipdb; ipdb.set_trace()
 
-  return grids, df, cols_by_type, target_cols
+  return patches, df, cols_by_type, target_cols
 
 @cache
-def get_magnetic_features(df, grids, num_pca_components=NUM_PCA_COMPONENTS):
+def get_magnetic_features(df, patches, num_pca_components=NUM_PCA_COMPONENTS):
   feats = {name: [] for name in [
     'min',
     'max',
@@ -766,29 +766,29 @@ def get_magnetic_features(df, grids, num_pca_components=NUM_PCA_COMPONENTS):
   pca = get_magnetic_pca()
   kpca = get_magnetic_kpca()
 
-  logger.info('transforming %d grids of shape %s...' % (len(grids), str(grids[0].shape)))
-  for i_grid, grid in enumerate(grids):
-    if i_grid and i_grid % 100 == 0:
-      progress_bar(i_grid, len(grids))
-    mn = grid.min()
-    mx = grid.max()
-    std = grid.std()
-    grid = ((grid - mn) / (mx - mn) * 256).astype('uint8')
-    glcm = greycomatrix(grid, [5], [0], symmetric=True, normed=True)
+  logger.info('transforming %d patches of shape %s...' % (len(patches), str(patches[0].shape)))
+  for i_patch, patch in enumerate(patches):
+    if i_patch and i_patch % 100 == 0:
+      progress_bar(i_patch, len(patches))
+    mn = patch.min()
+    mx = patch.max()
+    std = patch.std()
+    patch = ((patch - mn) / (mx - mn) * 256).astype('uint8')
+    glcm = greycomatrix(patch, [5], [0], symmetric=True, normed=True)
     correlation = greycoprops(glcm, 'correlation')[0][0]
-    variance = grid.var()
+    variance = patch.var()
     contrast = greycoprops(glcm, 'contrast')[0][0]
-    entropy = shannon_entropy(grid)
+    entropy = shannon_entropy(patch)
     homogeneity = greycoprops(glcm, 'homogeneity')[0][0]
     asm = greycoprops(glcm, 'ASM')[0][0]
-    _sum = grid.sum()
+    _sum = patch.sum()
 
     try:
-      grid_pca = pca.transform([grid.flatten()])[0]
-      grid_kpca = kpca.transform([grid.flatten()])[0]
+      patch_pca = pca.transform([patch.flatten()])[0]
+      patch_kpca = kpca.transform([patch.flatten()])[0]
       for i in range(num_pca_components):
-        feats['pca_%d' % i].append(grid_pca[i])
-        feats['kpca_%d' % i].append(grid_kpca[i])
+        feats['pca_%d' % i].append(patch_pca[i])
+        feats['kpca_%d' % i].append(patch_kpca[i])
     except ValueError as e:
       for i in range(num_pca_components):
         feats['pca_%d' % i].append(0)
@@ -808,8 +808,8 @@ def get_magnetic_features(df, grids, num_pca_components=NUM_PCA_COMPONENTS):
   return feats
 
 def do_magnetic_regression():
-  grids, df, cols_by_type, target_cols = get_full_data__old()
-  feats = get_magnetic_features(df, grids)
+  patches, df, cols_by_type, target_cols = get_full_data__old()
+  feats = get_magnetic_features(df, patches)
   for name, vals in feats.items():
     logger.info('name: %s val: %s' % (name, vals[0]))
     df[name] = vals
@@ -883,50 +883,50 @@ def display_full_magnetic_grid(save=True, show=True, stride=5):
     logger.info('plt.show()...')
     plt.show()
 
-def display_magnetic_grids(save=True, show=False):
+def display_magnetic_patches(save=True, show=False):
   if not (save or show):
     return
 
-  grids, df, cols_by_type, target_cols = get_full_data()
+  patches, df, cols_by_type, target_cols = get_full_data()
   lat_col, lon_col = get_lat_lon_cols(df.columns)
 
-  mn = min([grid.min() for grid in grids])
-  mx = max([grid.max() for grid in grids])
+  mn = min([patch.min() for patch in patches])
+  mx = max([patch.max() for patch in patches])
   logger.info('mn: %.2f, mx: %.2f' % (mn, mx))
 
-  for i, grid in enumerate(grids):
-    grid_min = grid.min()
-    grid_max = grid.max()
-    logger.info('grid_min: %s, grid_max: %s' % (grid_min, grid_max))
+  for i, patch in enumerate(patches):
+    patch_min = patch.min()
+    patch_max = patch.max()
+    logger.info('patch_min: %s, patch_max: %s' % (patch_min, patch_max))
     row = df.iloc[i]
     lat = row[lat_col]
     lon = row[lon_col]
 
     ax = plt.subplot(1,2,1)
-    plt.imshow(grid)
-    ax.set_title('Relative [%.2f, %.2f]' % (grid_min, grid_max))
+    plt.imshow(patch)
+    ax.set_title('Relative [%.2f, %.2f]' % (patch_min, patch_max))
 
     ax = plt.subplot(1,2,2)
-    plt.imshow(grid, vmin=mn, vmax=mx)
+    plt.imshow(patch, vmin=mn, vmax=mx)
     ax.set_title('Absolute [%.2f, %.2f]' % (mn, mx))
 
     plt.suptitle('Magnetic Intensities at lat: %s, lon: %s' % (lat, lon))
 
     if save:
-      filename = 'out/grid_%04d_%s_%s.png' % (i, lat, lon)
+      filename = 'out/patch_%04d_%s_%s.png' % (i, lat, lon)
       logger.info("Saving to file %s" % filename)
       plt.savefig(filename)
     if show:
       plt.show()
 
-def extract_grid_from_pivot(pivot, cx, cy, box_size_m=MAG_PATCH_SIZE_M):
+def extract_patch_from_pivot(pivot, cx, cy, box_size_m=MAG_PATCH_SIZE_M):
   half_size = box_size_m / 2.0
   x0 = int(cx - half_size)
   x1 = int(cx + half_size)
   y0 = int(cy - half_size)
   y1 = int(cy + half_size)
-  grid = pivot.loc[x0:x1,y0:y1].values
-  return grid
+  patch = pivot.loc[x0:x1,y0:y1].values
+  return patch
 
 def progress_bar(value, endvalue, suffix='', bar_length=40):
   percent = float(value) / endvalue
@@ -941,7 +941,7 @@ def progress_bar(value, endvalue, suffix='', bar_length=40):
   sys.stdout.flush()
 
 @cache
-def extract_all_grids(
+def extract_all_patches(
     flatten=True,
     patch_size_m=MAG_PATCH_SIZE_M,
     stride_size_m=MAG_STRIDE_SIZE_M,
@@ -965,18 +965,18 @@ def extract_all_grids(
   ny = len(y_range)
   n_total = nx * ny
   n = 0
-  logger.info('Extracting grids...')
+  logger.info('Extracting patches...')
   centroids = []
   for ix, x in enumerate(x_range):
     for iy, y in enumerate(y_range):
       cx = x + half_patch_size
       cy = y + half_patch_size
       centroids.append((cx, cy))
-      # TODO: grids are not the same size (e.g. for patch size 1000)
-      grid = extract_grid_from_pivot(pivot, cx, cy, patch_size_m)
+      # TODO: patches are not the same size (e.g. for patch size 1000)
+      patch = extract_patch_from_pivot(pivot, cx, cy, patch_size_m)
       if n % 10 == 0:
-        progress_bar(n, n_total, 'shape: %s' % str(grid.shape))
-      vals = grid.flatten() if flatten else grid
+        progress_bar(n, n_total, 'shape: %s' % str(patch.shape))
+      vals = patch.flatten() if flatten else patch
       vals = func(vals) if func else vals
       X.append(vals)
       n += 1
@@ -987,7 +987,7 @@ def extract_all_grids(
 
 @cache
 def _do_mag_pca(Klass, pct_rows=None):
-  X, _ = extract_all_grids()
+  X, _ = extract_all_patches()
 
   # Standardize
   mean = X.mean(axis=0)
@@ -1025,9 +1025,9 @@ def _display_pca(pca, name, save=True, show=False, n_components=10):
   for i, component in enumerate(pca.components_):
     if i > n_components:
       break
-    grid_size = int(np.sqrt(component.shape[0]))
-    grid = np.resize(component, (grid_size, grid_size))
-    plt.imshow(grid)
+    patch_size = int(np.sqrt(component.shape[0]))
+    patch = np.resize(component, (patch_size, patch_size))
+    plt.imshow(patch)
 
     exp_var_ratio = pca.explained_variance_ratio_[i]
     plt.title('%dth principal component\nexplains %.2f variance' % (
@@ -1038,7 +1038,7 @@ def _display_pca(pca, name, save=True, show=False, n_components=10):
     if save:
       filename = 'out/%s_%d.png' % (name, i)
       logger.info('Saving to %s...' % filename)
-      plt.savefig(filename, dpi=min(grid.shape))
+      plt.savefig(filename, dpi=min(patch.shape))
   import ipdb; ipdb.set_trace()
 
 def do_pca():
@@ -1062,12 +1062,12 @@ def do_autoencoder():
   if USE_MNIST:
     input_img = Input(shape=(28, 28, 1))  # adapt this if using `channels_first` image data format
   else:
-    X, _ = extract_all_grids(flatten=False)  # (48000, 51, 51)
+    X, _ = extract_all_patches(flatten=False)  # (48000, 51, 51)
     _, nrows, ncols = X.shape
     nrows = nrows if nrows % 2 == 0 else nrows + 1
     ncols = ncols if ncols % 2 == 0 else ncols + 1
-    #X = np.array([grid[:nrows,:ncols] for grid in X])
-    X = np.array([np.pad(grid, ((0, 1), (0, 1)), mode='edge') for grid in X])
+    #X = np.array([patch[:nrows,:ncols] for patch in X])
+    X = np.array([np.pad(patch, ((0, 1), (0, 1)), mode='edge') for patch in X])
     shape = (nrows, ncols, 1) # shape = list(X[0].shape) + [1]
     logger.info('shape: %s' % str(shape))  # (50, 50, 1)
     input_img = Input(shape=shape)
@@ -1126,11 +1126,11 @@ def do_autoencoder():
   import ipdb; ipdb.set_trace()
 
 @cache
-def _get_grid_masks(grids, show=False, majority_only=False):
+def _get_patch_masks(patches, show=False, majority_only=False):
   rval = []
-  for i, grid in enumerate(grids):
-    logger.debug('grid %d of %d' % (i, len(grids)))
-    im = grid
+  for i, patch in enumerate(patches):
+    logger.debug('patch %d of %d' % (i, len(patches)))
+    im = patch
     im -= im.min()
     im /= im.max()
     im *= 255
@@ -1151,7 +1151,7 @@ def _get_grid_masks(grids, show=False, majority_only=False):
     masks = [im > val for val in vals]
 
     # add majority vote
-    pixel_counts = np.zeros(grid.shape)
+    pixel_counts = np.zeros(patch.shape)
     for mask in masks:
       pixel_counts += mask
     majority_mask = pixel_counts > (len(masks) / 2)
@@ -1170,8 +1170,8 @@ def _get_grid_masks(grids, show=False, majority_only=False):
       nr = np.ceil(np.sqrt(N))
       nc = np.ceil((N/nr))
       ax = plt.subplot(nr,nc,1)
-      plt.imshow(grid)
-      plt.title('grid')
+      plt.imshow(patch)
+      plt.title('patch')
       for i, (mask, mask_size, mask_name) in enumerate(mask_tups):
         ax = plt.subplot(nr,nc,i+2)
         plt.imshow(mask)
@@ -1180,13 +1180,13 @@ def _get_grid_masks(grids, show=False, majority_only=False):
       plt.show()
   return rval
 
-def _get_mask_feats(grids, masks, feat_names=None):
+def _get_mask_feats(patches, masks, feat_names=None):
   feats = {}
-  for grid, grid_masks in zip(grids, masks):
-    for mask, size, name in grid_masks:
+  for patch, patch_masks in zip(patches, masks):
+    for mask, size, name in patch_masks:
       # density
       if not feat_names or 'density' in feat_names:
-        vals = grid[mask]
+        vals = patch[mask]
         density = vals.sum() / mask.size
         feat_name = '%s_density' % name
         feats.setdefault(feat_name, [])
@@ -1199,7 +1199,7 @@ def _get_mask_feats(grids, masks, feat_names=None):
         feats[feat_name].append(area)
       # sum
       if not feat_names or 'sum' in feat_names:
-        vals = grid[mask]
+        vals = patch[mask]
         vals_sum = vals.sum()
         feat_name = '%s_sum' % name
         feats.setdefault(feat_name, [])
@@ -1208,10 +1208,10 @@ def _get_mask_feats(grids, masks, feat_names=None):
   return feats
 
 def do_blob_regression():
-  grids, df, cols_by_type, target_cols = get_full_data__old()
+  patches, df, cols_by_type, target_cols = get_full_data__old()
   logger.info('Getting masks...')
-  masks = _get_grid_masks(grids, majority_only=True)
-  mask_feats = _get_mask_feats(grids, masks, ['sum'])
+  masks = _get_patch_masks(patches, majority_only=True)
+  mask_feats = _get_mask_feats(patches, masks, ['sum'])
   for name, vals in mask_feats.items():
     logger.info('name: %s val: %s' % (name, vals[0]))
     df[name] = vals
@@ -1219,7 +1219,7 @@ def do_blob_regression():
   regress(df, target_cols, mask_feat_names)
   import ipdb; ipdb.set_trace()
 
-def _ignore_lat_lon(grids, df, cols_by_type, target_cols):
+def _ignore_lat_lon(patches, df, cols_by_type, target_cols):
   logger.info('removing %s lat/lon rows...' % len(IGNORE_LAT_LON_TUPS))
   lat_col, lon_col = get_lat_lon_cols(df)
   for lat, lon in IGNORE_LAT_LON_TUPS:
@@ -1228,8 +1228,8 @@ def _ignore_lat_lon(grids, df, cols_by_type, target_cols):
     ignore_idxs = np.nonzero(ignore_mask)
     logger.debug('ignore_idxs: %s' % ignore_idxs)
     for ignore_idx in ignore_idxs:  # should be only one
-      grids = [g for i, g in enumerate(grids) if i not in ignore_idx]
-  return grids, df, cols_by_type, target_cols
+      patches = [g for i, g in enumerate(patches) if i not in ignore_idx]
+  return patches, df, cols_by_type, target_cols
 
 def _get_owner_col(df):
   num_uniques = [df[col].unique().size for col in OWNER_COLS]
@@ -1263,12 +1263,12 @@ def plot_mask_sum_vs_mkt_cap(
     get_full_data_fn=get_full_data
 ):
   # TODO: refactor
-  grids, df, cols_by_type, target_cols = get_full_data_fn(
+  patches, df, cols_by_type, target_cols = get_full_data_fn(
       keep_owner_cols=group_by_owner)
   lat_col, lon_col = get_lat_lon_cols(df)
   logger.info('Getting masks...')
-  masks = _get_grid_masks(grids, majority_only=True)
-  mask_feats = _get_mask_feats(grids, masks)
+  masks = _get_patch_masks(patches, majority_only=True)
+  mask_feats = _get_mask_feats(patches, masks)
   #logger.debug('mask_feats: %s' % pformat(mask_feats))
   sums = mask_feats['majority_sum']
   #TODO: get rid of area
@@ -1437,7 +1437,7 @@ if __name__ == '__main__':
       action='store_true')
   parser.add_argument(
       '-d',
-      help='Display magnetic grids',
+      help='Display magnetic patches',
       action='store_true')
   parser.add_argument(
       '-f',
@@ -1491,7 +1491,7 @@ if __name__ == '__main__':
     do_kpca()
 
   if args.d:
-    display_magnetic_grids()
+    display_magnetic_patches()
 
   if args.f:
     display_full_magnetic_grid()
