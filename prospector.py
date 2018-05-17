@@ -7,7 +7,19 @@ TODO:
     https://github.com/romanegloo/deepsat 
     https://github.com/kkgadiraju/SAT-Classification-Using-CNN
 '''
+import keras
+import numpy as np
+import os
+from keras.callbacks import ModelCheckpoint, LambdaCallback
+from keras.datasets import cifar10
+from keras.layers import Dense, Dropout, Activation, Flatten
+from keras.layers import Conv2D, MaxPooling2D
+from keras.models import Sequential
+from keras.preprocessing.image import ImageDataGenerator
+from matplotlib import pyplot as plt
+from random import shuffle
 
+from gdal_grid import GDALGrid
 from minalytics import (
     get_full_data,
     get_patch_from_grid,
@@ -17,12 +29,6 @@ from minalytics import (
     MAG_PATCH_SIZE_M,
     BINARY_MAGNETIC_GRID_PATH
 )
-
-from gdal_grid import GDALGrid
-from random import shuffle
-
-import numpy as np
-import percache
 
 def get_empty_patches(grid, nonempty_lon_lat_tups, patch_size_m):
   empty_patches = []
@@ -71,11 +77,14 @@ def get_empty_patches(grid, nonempty_lon_lat_tups, patch_size_m):
   return empty_patches
 
 @cache
-def load_data(visualize=False):
+def load_data(nodata_to_mean=False):
   mine_patches, df, cols_by_type, target_cols = get_full_data(
       patch_size_m=MAG_PATCH_SIZE_M
   )
   grid = GDALGrid(BINARY_MAGNETIC_GRID_PATH)
+  arr = grid.arr
+  if nodata_to_mean:
+    arr[arr == arr.min()] = arr.mean()  # 0
 
   lat_col, lon_col = get_lat_lon_cols(df.columns)
 
@@ -85,16 +94,6 @@ def load_data(visualize=False):
       nonempty_lon_lat_tups,
       patch_size_m=MAG_PATCH_SIZE_M
   )
-
-  if visualize:
-    from matplotlib import pyplot as plt
-    N = 5
-    patches = mine_patches[:N] + empty_patches[:N]
-    for i, patch in enumerate(patches):
-      plt.subplot(N, N, i+1)
-      plt.show(patch)
-    plt.show()
-    import sys; sys.exit()
 
   X = np.array(mine_patches + empty_patches)
   X = X[:,:,:,np.newaxis]
@@ -117,30 +116,117 @@ def load_data(visualize=False):
 
   return (x_train, y_train), (x_test, y_test)
 
-###
+def plot_grids(x, y, y_pred=None, nrows=6, ncols=3):
+  N = nrows * ncols
 
-import keras
-from keras.datasets import cifar10
-from keras.preprocessing.image import ImageDataGenerator
-from keras.models import Sequential
-from keras.layers import Dense, Dropout, Activation, Flatten
-from keras.layers import Conv2D, MaxPooling2D
-import os
+  mine_patch_idxs = y == 1
+  empty_patch_idxs = y == 0
+  mine_patches = x[mine_patch_idxs][:,:,:,0]
+  empty_patches = x[empty_patch_idxs][:,:,:,0]
+
+  data_vmin = min((mine_patches.min(), empty_patches.min()))
+  data_vmax = max((mine_patches.max(), empty_patches.max()))
+  print('data_vmin: %.2f, data_vmax: %.2f' % (data_vmin, data_vmax))
+
+  mine_patches = mine_patches[:N]
+  empty_patches = empty_patches[:N]
+  show_vmin = min((mine_patches.min(), empty_patches.min()))
+  show_vmax = min((mine_patches.max(), empty_patches.max()))
+  print('show_vmin: %.2f, show_vmax: %.2f' % (show_vmin, show_vmax))
+
+  for title, patches in [
+      ('mine patches', mine_patches),
+      ('non-mine patches', empty_patches)
+  ]:
+    print('len(patches): %s' % len(patches))
+    plt.figure()
+    for i, patch in enumerate(patches):
+      print('i: %s, patch.shape: %s, min: %.2f, max: %.2f' % (
+        i, patch.shape, patch.min(), patch.max()))
+      def plot(pos, vmin, vmax):
+        plt.subplot(nrows, ncols*2, pos)
+        plt.imshow(patch, vmin=vmin, vmax=vmax)
+        ax = plt.gca()
+        ax.get_xaxis().set_visible(False)
+        ax.get_yaxis().set_visible(False)
+        if y_pred is not None:
+          if y[i] != y_pred[i]:
+            for spine in ax.spines.values():
+              spine.set_edgecolor('red')
+              spine.set_linewidth(3)
+      plot(i*2+1, data_vmin, data_vmax)
+      plot(i*2+2, show_vmin, show_vmax)
+    title = '%s\n(%.2f, %.2f)\n(%.2f, %.2f)' % (
+        title, data_vmin, data_vmax, show_vmin, show_vmax)
+    plt.suptitle(title)
+
+  plt.show()
 
 batch_size = 32
 num_classes = 2
-epochs = 100
+epochs = 10
 data_augmentation = True
 save_dir = os.path.join(os.getcwd(), 'saved_models')
 model_name = 'keras_magnetism_trained_model.h5'
 
-# The data, split between train and test sets:
-USE_CIFAR = False
-print('load_data(), USE_CIFAR: %s' % USE_CIFAR)
-if USE_CIFAR:
-  (x_train, y_train), (x_test, y_test) = cifar10.load_data()
-else:
-  (x_train, y_train), (x_test, y_test) = load_data(visualize=True)
+(x_train, y_train), (x_test, y_test) = load_data(
+    #read_cache=False,
+    nodata_to_mean=False
+)
+
+SHOW_HIST = False
+if SHOW_HIST:
+  vals = np.concatenate((x_train.flatten(), x_test.flatten()))
+  plt.hist(vals, log=True)
+  plt.show()
+
+TRUNCATE = None  #0.05
+if TRUNCATE:
+  def truncate(z):
+    print('truncate() before: %s' % str(z.shape))
+    z = z[:int(len(z) * TRUNCATE), ...]
+    print('truncate() after: %s' % str(z.shape))
+    return z
+  x_train = truncate(x_train)
+  y_train = truncate(y_train)
+
+def get_min_max(name, arrs):
+  mn = min([arr.min() for arr in arrs])
+  mx = max([arr.max() for arr in arrs])
+  print('%s, mn: %.2f, mx: %.2f' % (name, mn, mx))
+  return mn, mx
+
+NORMALIZE = True
+if NORMALIZE:
+  # XXX accuracy goes to 50%
+  new_min = 1
+  new_max = 10
+  mn, mx = get_min_max('before normalize', [x_train, x_test])
+  # shift to [0, 1]
+  x_train = (x_train - mn) / (mx - mn)
+  x_test = (x_test - mn) / (mx - mn)
+  # shift to [new_min, new_max]
+  x_train = (x_train * (new_max - new_min)) + new_min
+  x_test = (x_test * (new_max - new_min)) + new_min
+  get_min_max('after normalize', [x_train, x_test])
+
+LOG = True
+if LOG:
+  mn, mx = get_min_max('before log', [x_train, x_test])
+  x_train = np.log(x_train)
+  x_test = np.log(x_test)
+  get_min_max('after log', [x_train, x_test])
+
+PLOT_BEFORE = True
+if PLOT_BEFORE:
+  plot_grids(x_test, y_test)
+
+# XXX the network doesn't learn without this for some reason
+NORM_HACK = True
+if NORM_HACK:
+  x_train /= 255
+  x_test /= 255
+
 
 print('x_train shape:', x_train.shape)
 print(x_train.shape[0], 'train samples')
@@ -173,55 +259,94 @@ model.add(Dropout(0.5))
 model.add(Dense(num_classes))
 model.add(Activation('softmax'))
 
-# initiate RMSprop optimizer
-opt = keras.optimizers.rmsprop(lr=0.0001, decay=1e-6)
+#opt = keras.optimizers.rmsprop(lr=0.0001, decay=1e-6)
+opt = keras.optimizers.Adam(
+    lr=0.001,
+    beta_1=0.9,
+    beta_2=0.999,
+    epsilon=None,
+    decay=0.0,
+    amsgrad=False
+)
 
-# Let's train the model using RMSprop
+
+# train model
 model.compile(loss='categorical_crossentropy',
               optimizer=opt,
               metrics=['accuracy'])
 
-x_train = x_train.astype('float32')
-x_test = x_test.astype('float32')
-x_train /= 255
-x_test /= 255
+'''
+model_path = os.path.join(save_dir, 'partial_' + model_name)
+checkpoint = ModelCheckpoint(
+    model_path,
+    monitor='loss',
+    verbose=1,
+    save_best_only=True,
+    mode='min'
+)
+plot_callback = LambdaCallback(
+    #on_epoch_end=lambda epoch, logs: plot_grids(
+    on_train_end=lambda logs: plot_grids(
+      x_test,
+      y_test.argmax(axis=1),
+      model.predict(x_test, verbose=1).argmax(axis=1)
+    ),
+)
+'''
+callbacks = [
+    #checkpoint,
+    #plot_callback
+]
 
 if not data_augmentation:
     print('Not using data augmentation.')
-    model.fit(x_train, y_train,
-              batch_size=batch_size,
-              epochs=epochs,
-              validation_data=(x_test, y_test),
-              shuffle=True)
+    history = model.fit(x_train, y_train,
+                        batch_size=batch_size,
+                        epochs=epochs,
+                        validation_data=(x_test, y_test),
+                        shuffle=True,
+                        callbacks=callbacks)
 else:
     print('Using real-time data augmentation.')
     # This will do preprocessing and realtime data augmentation:
     datagen = ImageDataGenerator(
-        featurewise_center=False,  # set input mean to 0 over the dataset
-        samplewise_center=False,  # set each sample mean to 0
-        featurewise_std_normalization=False,  # divide inputs by std of the dataset
-        samplewise_std_normalization=False,  # divide each input by its std
-        zca_whitening=False,  # apply ZCA whitening
-        rotation_range=0,  # randomly rotate images in the range (degrees, 0 to 180)
-        width_shift_range=0.1,  # randomly shift images horizontally (fraction of total width)
-        height_shift_range=0.1,  # randomly shift images vertically (fraction of total height)
-        horizontal_flip=True,  # randomly flip images
-        vertical_flip=False)  # randomly flip images
+        # set input mean to 0 over the dataset
+        featurewise_center=False,
+        # set each sample mean to 0
+        samplewise_center=False,
+        # divide inputs by std of the dataset
+        featurewise_std_normalization=False,
+        # divide each input by its std
+        samplewise_std_normalization=False,
+        # apply ZCA whitening
+        zca_whitening=False,
+        # randomly rotate images in the range (degrees, 0 to 180)
+        rotation_range=0,
+        # randomly shift images horizontally (fraction of total width)
+        width_shift_range=0.1,
+        # randomly shift images vertically (fraction of total height)
+        height_shift_range=0.1,
+        # randomly flip images
+        horizontal_flip=True,
+        # randomly flip images
+        vertical_flip=True,
+    )
 
     # Compute quantities required for feature-wise normalization
     # (std, mean, and principal components if ZCA whitening is applied).
     datagen.fit(x_train)
 
     # Fit the model on the batches generated by datagen.flow().
-    model.fit_generator(datagen.flow(x_train, y_train,
-                                     batch_size=batch_size),
-                        epochs=epochs,
-                        validation_data=(x_test, y_test),
-                        workers=4)
+    history = model.fit_generator(datagen.flow(x_train, y_train,
+                                               batch_size=batch_size),
+                                  epochs=epochs,
+                                  validation_data=(x_test, y_test),
+                                  workers=4,
+                                  callbacks=callbacks)
 
 # Save model and weights
 if not os.path.isdir(save_dir):
-    os.makedirs(save_dir)
+  os.makedirs(save_dir)
 model_path = os.path.join(save_dir, model_name)
 model.save(model_path)
 print('Saved trained model at %s ' % model_path)
@@ -230,3 +355,16 @@ print('Saved trained model at %s ' % model_path)
 scores = model.evaluate(x_test, y_test, verbose=1)
 print('Test loss:', scores[0])
 print('Test accuracy:', scores[1])
+
+plot_grids(
+  x_test,
+  y_test.argmax(axis=1),
+  model.predict(x_test, verbose=1).argmax(axis=1)
+)
+
+val_acc = history.history['val_acc']
+plt.plot(val_acc)
+plt.title('Validation Accuracy')
+plt.show()
+
+import ipdb; ipdb.set_trace()
