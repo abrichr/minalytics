@@ -8,15 +8,17 @@ TODO:
     https://github.com/kkgadiraju/SAT-Classification-Using-CNN
 '''
 import keras
+import math
 import numpy as np
 import os
-from keras.callbacks import ModelCheckpoint, LambdaCallback
+from keras.callbacks import ModelCheckpoint, LambdaCallback, Callback
 from keras.datasets import cifar10
 from keras.layers import Dense, Dropout, Activation, Flatten
 from keras.layers import Conv2D, MaxPooling2D
 from keras.models import Sequential
 from keras.preprocessing.image import ImageDataGenerator
 from matplotlib import pyplot as plt
+from pprint import pprint, pformat
 from random import shuffle
 
 from gdal_grid import GDALGrid
@@ -29,6 +31,10 @@ from minalytics import (
     MAG_PATCH_SIZE_M,
     BINARY_MAGNETIC_GRID_PATH
 )
+from utils import LR_Find
+
+save_dir = os.path.join(os.getcwd(), 'saved_models')
+model_name = 'keras_magnetism_trained_model.h5'
 
 def get_empty_patches(grid, nonempty_lon_lat_tups, patch_size_m):
   empty_patches = []
@@ -134,12 +140,13 @@ def plot_grids(x, y, y_pred=None, nrows=6, ncols=3):
   show_vmax = min((mine_patches.max(), empty_patches.max()))
   print('show_vmin: %.2f, show_vmax: %.2f' % (show_vmin, show_vmax))
 
+  rval = []
   for title, patches in [
       ('mine patches', mine_patches),
       ('non-mine patches', empty_patches)
   ]:
     print('len(patches): %s' % len(patches))
-    plt.figure()
+    rval.append(plt.figure())
     for i, patch in enumerate(patches):
       print('i: %s, patch.shape: %s, min: %.2f, max: %.2f' % (
         i, patch.shape, patch.min(), patch.max()))
@@ -160,35 +167,7 @@ def plot_grids(x, y, y_pred=None, nrows=6, ncols=3):
         title, data_vmin, data_vmax, show_vmin, show_vmax)
     plt.suptitle(title)
 
-  plt.show()
-
-batch_size = 32
-num_classes = 2
-epochs = 10
-data_augmentation = True
-save_dir = os.path.join(os.getcwd(), 'saved_models')
-model_name = 'keras_magnetism_trained_model.h5'
-
-(x_train, y_train), (x_test, y_test) = load_data(
-    #read_cache=False,
-    nodata_to_mean=False
-)
-
-SHOW_HIST = False
-if SHOW_HIST:
-  vals = np.concatenate((x_train.flatten(), x_test.flatten()))
-  plt.hist(vals, log=True)
-  plt.show()
-
-TRUNCATE = None  #0.05
-if TRUNCATE:
-  def truncate(z):
-    print('truncate() before: %s' % str(z.shape))
-    z = z[:int(len(z) * TRUNCATE), ...]
-    print('truncate() after: %s' % str(z.shape))
-    return z
-  x_train = truncate(x_train)
-  y_train = truncate(y_train)
+  return rval
 
 def get_min_max(name, arrs):
   mn = min([arr.min() for arr in arrs])
@@ -196,175 +175,475 @@ def get_min_max(name, arrs):
   print('%s, mn: %.2f, mx: %.2f' % (name, mn, mx))
   return mn, mx
 
-NORMALIZE = True
-if NORMALIZE:
-  # XXX accuracy goes to 50%
-  new_min = 1
-  new_max = 10
-  mn, mx = get_min_max('before normalize', [x_train, x_test])
-  # shift to [0, 1]
-  x_train = (x_train - mn) / (mx - mn)
-  x_test = (x_test - mn) / (mx - mn)
-  # shift to [new_min, new_max]
-  x_train = (x_train * (new_max - new_min)) + new_min
-  x_test = (x_test * (new_max - new_min)) + new_min
-  get_min_max('after normalize', [x_train, x_test])
+def do_hist(before_or_after, x_train, y_train, x_test, y_test):
+  bins_by_log = {True: None, False: None}
+  for i, (log_title, hist_log) in enumerate([('', False), ('log', True)]):
+    plt.figure()
+    plt.suptitle('%s %s' % (log_title, before_or_after))
+    for j, (cls_title, y_targ) in enumerate([('empty', 0), ('mine', 1)]):
+      for k, (grp_title, x, y) in enumerate([('train', x_train, y_train), ('test', x_test, y_test)]):
+        plt.subplot(2,2,j*2+k+1)
+        idxs = y == y_targ
+        _x = x[idxs]
+        bins = bins_by_log[hist_log]
+        _, _bins, _ = plt.hist(_x.flatten(), log=hist_log, bins=bins)
+        plt.title('%s %s' % (cls_title, grp_title))
+        bins_by_log[hist_log] = bins if bins is not None else _bins
 
-LOG = True
-if LOG:
-  mn, mx = get_min_max('before log', [x_train, x_test])
-  x_train = np.log(x_train)
-  x_test = np.log(x_test)
-  get_min_max('after log', [x_train, x_test])
+def run(
+    lr=0.0001,
+    decay=1e-6,
 
-PLOT_BEFORE = True
-if PLOT_BEFORE:
-  plot_grids(x_test, y_test)
+    batch_size=32,
+    num_classes=2,
+    epochs=10,
+    data_augmentation=True,
 
-# XXX the network doesn't learn without this for some reason
-NORM_HACK = True
-if NORM_HACK:
-  x_train /= 255
-  x_test /= 255
+    show_hist=False,
+    truncate_ratio=None,
+    norm_bounds=(-1, 1),
+    log=False,
+    norm_hack=False,
+    plot_before=False,
+    show_plots=False,
+    save_plots=True,
+    save_final_model=False,
 
+    find_lr=False,
+    stop_early=False,
 
-print('x_train shape:', x_train.shape)
-print(x_train.shape[0], 'train samples')
-print(x_test.shape[0], 'test samples')
+    featurewise_center=False,
+    featurewise_std_normalization=False,
+):
 
-# Convert class vectors to binary class matrices.
-y_train = keras.utils.to_categorical(y_train, num_classes)
-y_test = keras.utils.to_categorical(y_test, num_classes)
+  (x_train, y_train), (x_test, y_test) = load_data(
+      #read_cache=False,
+      nodata_to_mean=False
+  )
 
-model = Sequential()
-model.add(Conv2D(32, (3, 3), padding='same',
-                 input_shape=x_train.shape[1:]))
-model.add(Activation('relu'))
-model.add(Conv2D(32, (3, 3)))
-model.add(Activation('relu'))
-model.add(MaxPooling2D(pool_size=(2, 2)))
-model.add(Dropout(0.25))
+  if show_hist:
+    do_hist('before', x_train, y_train, x_test, y_test)
 
-model.add(Conv2D(64, (3, 3), padding='same'))
-model.add(Activation('relu'))
-model.add(Conv2D(64, (3, 3)))
-model.add(Activation('relu'))
-model.add(MaxPooling2D(pool_size=(2, 2)))
-model.add(Dropout(0.25))
+  if truncate_ratio:
+    def truncate(name, z):
+      print('truncate() %s before: %s' % (name, str(z.shape)))
+      z = z[:int(len(z) * truncate_ratio), ...]
+      print('truncate() %s after: %s' % (name, str(z.shape)))
+      return z
+    x_train = truncate('x_train', x_train)
+    y_train = truncate('y_train', y_train)
+    x_test = truncate('x_test', x_test)
+    y_test = truncate('y_test', y_test)
 
-model.add(Flatten())
-model.add(Dense(512))
-model.add(Activation('relu'))
-model.add(Dropout(0.5))
-model.add(Dense(num_classes))
-model.add(Activation('softmax'))
+  if log:
+    mn, mx = get_min_max('before log', [x_train, x_test])
+    if mn <= 0:
+      x_train = x_train - mn + np.finfo(float).eps
+      x_test = x_test - mn + np.finfo(float).eps
+      mn, mx = get_min_max('before log, after adjusting', [x_train, x_test])
+    x_train = np.log(x_train)
+    x_test = np.log(x_test)
+    get_min_max('after log', [x_train, x_test])
 
-#opt = keras.optimizers.rmsprop(lr=0.0001, decay=1e-6)
-opt = keras.optimizers.Adam(
-    lr=0.001,
-    beta_1=0.9,
-    beta_2=0.999,
-    epsilon=None,
-    decay=0.0,
-    amsgrad=False
-)
+  if norm_bounds:
+    # XXX accuracy goes to 50%
+    new_min, new_max = norm_bounds
+    # technically shouldn't use training data here...
+    mn, mx = get_min_max('before normalize', [x_train, x_test])
+    # shift to [0, 1]
+    x_train = (x_train - mn) / (mx - mn)
+    x_test = (x_test - mn) / (mx - mn)
+    # shift to [new_min, new_max]
+    x_train = (x_train * (new_max - new_min)) + new_min
+    x_test = (x_test * (new_max - new_min)) + new_min
+    get_min_max('after normalize', [x_train, x_test])
 
+  # XXX the network doesn't learn without this for some reason
+  if norm_hack:
+    x_train /= 255
+    x_test /= 255
 
-# train model
-model.compile(loss='categorical_crossentropy',
-              optimizer=opt,
-              metrics=['accuracy'])
+  if plot_before:
+    plot_grids(x_test, y_test)
+    plt.show()
 
-'''
-model_path = os.path.join(save_dir, 'partial_' + model_name)
-checkpoint = ModelCheckpoint(
-    model_path,
-    monitor='loss',
-    verbose=1,
-    save_best_only=True,
-    mode='min'
-)
-plot_callback = LambdaCallback(
-    #on_epoch_end=lambda epoch, logs: plot_grids(
-    on_train_end=lambda logs: plot_grids(
+  if show_hist:
+    do_hist('after', x_train, y_train, x_test, y_test)
+    plt.show()
+
+  print('x_train shape:', x_train.shape)
+  print(x_train.shape[0], 'train samples')
+  print(x_test.shape[0], 'test samples')
+
+  # Convert class vectors to binary class matrices.
+  y_train = keras.utils.to_categorical(y_train, num_classes)
+  y_test = keras.utils.to_categorical(y_test, num_classes)
+
+  model = Sequential()
+  model.add(Conv2D(32, (3, 3), padding='same',
+                   input_shape=x_train.shape[1:]))
+  model.add(Activation('relu'))
+  model.add(Conv2D(32, (3, 3)))
+  model.add(Activation('relu'))
+  model.add(MaxPooling2D(pool_size=(2, 2)))
+  model.add(Dropout(0.25))
+
+  model.add(Conv2D(64, (3, 3), padding='same'))
+  model.add(Activation('relu'))
+  model.add(Conv2D(64, (3, 3)))
+  model.add(Activation('relu'))
+  model.add(MaxPooling2D(pool_size=(2, 2)))
+  model.add(Dropout(0.25))
+
+  model.add(Flatten())
+  model.add(Dense(512))
+  model.add(Activation('relu'))
+  model.add(Dropout(0.5))
+  model.add(Dense(num_classes))
+  model.add(Activation('softmax'))
+
+  #opt = keras.optimizers.rmsprop(lr=lr, decay=decay)
+  opt = keras.optimizers.Adam(
+      lr=lr,
+      decay=decay,
+      beta_1=0.9,
+      beta_2=0.999,
+      epsilon=None,
+      amsgrad=False
+  )
+
+  model.compile(loss='categorical_crossentropy',
+                optimizer=opt,
+                metrics=['accuracy'])
+
+  callbacks = []
+
+  SAVE_MODEL_CB = False
+  if SAVE_MODEL_CB:
+    model_path = os.path.join(save_dir, 'partial_' + model_name)
+    checkpoint = ModelCheckpoint(
+        model_path,
+        monitor='loss',
+        verbose=1,
+        save_best_only=True,
+        mode='min'
+    )
+    callbacks.append(checkpoint)
+
+  PLOT_CB = False
+  if PLOT_CB:
+    plot_callback = LambdaCallback(
+        #on_epoch_end=lambda epoch, logs: plot_grids(
+        on_train_end=lambda logs: plot_grids(
+          x_test,
+          y_test.argmax(axis=1),
+          model.predict(x_test, verbose=1).argmax(axis=1)
+        ) and plt.show(),
+    )
+    callbacks.append(plot_callback)
+
+  if stop_early or find_lr:
+    assert not (stop_early and find_lr)
+
+  if stop_early:
+    early_stopping = keras.callbacks.EarlyStopping(
+        monitor='val_loss',
+        min_delta=0,
+        patience=2,
+        verbose=1,
+        mode='auto',
+    )
+    callbacks.append(early_stopping)
+
+  if find_lr:
+    lr_find = LR_Find(len(x_train) / batch_size)
+    callbacks.append(lr_find)
+
+  class MyCallback(Callback):
+    def __init__(self, model):
+      self.model = model
+      self.layer_weights_by_epoch = {}
+    def on_epoch_end(self, epoch, logs=None):
+      try:
+        assert epoch not in self.layer_weights_by_epoch
+      except Exception as exc:
+        import ipdb; ipdb.set_trace()
+        foo = 1
+      self.layer_weights_by_epoch[epoch] = []
+      for i_layer, layer in enumerate(model.layers):
+        weights = layer.get_weights()
+        if weights:
+          self.layer_weights_by_epoch[epoch].append(weights)
+    def print_weight_stats(self):
+      from hipsterplot import plot
+      stats_by_layer_group = {}
+      try:
+        for epoch, layer_weights in self.layer_weights_by_epoch.items():
+          for i_layer, weights in enumerate(layer_weights):
+            stats_by_layer_group.setdefault(i_layer, {})
+            for i_group, w in enumerate(weights):
+              stats_by_layer_group[i_layer].setdefault(i_group, [])
+              stats_by_layer_group[i_layer][i_group].append((w.min(), w.max(), w.mean(), w.std()))
+              print('epoch: %s, layer: %s, group: %.5f, min: %.5f, max: %.5f, mean: %.5f' % (epoch, i_layer, i_group, w.min(), w.max(), w.mean()))
+        for i_layer in stats_by_layer_group:
+          for i_group in stats_by_layer_group[i_layer]:
+            stats = stats_by_layer_group[i_layer][i_group]
+            for name, vals in zip(('min', 'max', 'mean', 'std'), stats):
+              print('*' * 80)
+              print('layer %s, group %s, %s' % (i_layer, i_group, name))
+              plot(vals)
+              print('*' * 80)
+      except Exception as exc:
+        import traceback
+        traceback.print_exc()
+        import ipdb; ipdb.set_trace()
+        foo = 1
+
+  mcb = MyCallback(model)
+  callbacks.append(mcb)
+
+  print('x_train min: %.5f, max: %.5f, mean: %.5f, std: %.5f' % (
+    x_train.min(), x_train.max(), x_train.mean(), x_train.std()))
+
+  '''
+  #from bashplotlib.scatterplot import plot_scatter
+  from bashplotlib.histogram import plot_hist 
+  import io
+  plot_hist(io.StringIO('\n'.join(['%s' % _x for _x in x_train.flatten()])))
+  '''
+
+  if not data_augmentation:
+      print('Not using data augmentation.')
+      history = model.fit(x_train, y_train,
+                          batch_size=batch_size,
+                          epochs=epochs,
+                          validation_data=(x_test, y_test),
+                          shuffle=True,
+                          callbacks=callbacks)
+  else:
+      print('Using real-time data augmentation.')
+      # This will do preprocessing and realtime data augmentation:
+      datagen = ImageDataGenerator(
+          # set input mean to 0 over the dataset
+          featurewise_center=featurewise_center,
+          # set each sample mean to 0
+          samplewise_center=False,
+          # divide inputs by std of the dataset
+          featurewise_std_normalization=featurewise_std_normalization,
+          # divide each input by its std
+          samplewise_std_normalization=False,
+          # apply ZCA whitening
+          zca_whitening=False,
+          # randomly rotate images in the range (degrees, 0 to 180)
+          rotation_range=0,
+          # randomly shift images horizontally (fraction of total width)
+          width_shift_range=0.1,
+          # randomly shift images vertically (fraction of total height)
+          height_shift_range=0.1,
+          # randomly flip images
+          horizontal_flip=True,
+          # randomly flip images
+          vertical_flip=True,
+      )
+
+      # Compute quantities required for feature-wise normalization
+      # (std, mean, and principal components if ZCA whitening is applied).
+      datagen.fit(x_train)
+
+      vals = []
+      f = datagen.flow(x_train, y_train, batch_size=batch_size)
+      for _ in range(math.ceil(len(x_train) // batch_size)):
+        vals.append(next(f))
+      xs = np.array([_x for _x, _y in vals])
+      print('after ImageDataGenerator, min: %.5f, max: %.5f, mean: %.5f, std: %.5f' % (
+        xs.min(), xs.max(), xs.mean(), xs.std()))
+        
+
+      # Fit the model on the batches generated by datagen.flow().
+      history = model.fit_generator(datagen.flow(x_train, y_train,
+                                                 batch_size=batch_size),
+                                    epochs=epochs,
+                                    validation_data=(x_test, y_test),
+                                    workers=4,
+                                    callbacks=callbacks)
+
+  mcb.print_weight_stats()
+
+  # Save model and weights
+  if save_final_model:
+    if not os.path.isdir(save_dir):
+      os.makedirs(save_dir)
+    model_path = os.path.join(save_dir, model_name)
+    model.save(model_path)
+    print('Saved trained model at %s ' % model_path)
+
+  # Score trained model.
+  scores = model.evaluate(x_test, y_test, verbose=1)
+  print('Test loss:', scores[0])
+  print('Test accuracy:', scores[1])
+
+  if show_plots or save_plots:
+    figs = []
+
+    '''
+    figs += plot_grids(
       x_test,
       y_test.argmax(axis=1),
       model.predict(x_test, verbose=1).argmax(axis=1)
-    ),
-)
-'''
-callbacks = [
-    #checkpoint,
-    #plot_callback
-]
-
-if not data_augmentation:
-    print('Not using data augmentation.')
-    history = model.fit(x_train, y_train,
-                        batch_size=batch_size,
-                        epochs=epochs,
-                        validation_data=(x_test, y_test),
-                        shuffle=True,
-                        callbacks=callbacks)
-else:
-    print('Using real-time data augmentation.')
-    # This will do preprocessing and realtime data augmentation:
-    datagen = ImageDataGenerator(
-        # set input mean to 0 over the dataset
-        featurewise_center=False,
-        # set each sample mean to 0
-        samplewise_center=False,
-        # divide inputs by std of the dataset
-        featurewise_std_normalization=False,
-        # divide each input by its std
-        samplewise_std_normalization=False,
-        # apply ZCA whitening
-        zca_whitening=False,
-        # randomly rotate images in the range (degrees, 0 to 180)
-        rotation_range=0,
-        # randomly shift images horizontally (fraction of total width)
-        width_shift_range=0.1,
-        # randomly shift images vertically (fraction of total height)
-        height_shift_range=0.1,
-        # randomly flip images
-        horizontal_flip=True,
-        # randomly flip images
-        vertical_flip=True,
     )
+    '''
 
-    # Compute quantities required for feature-wise normalization
-    # (std, mean, and principal components if ZCA whitening is applied).
-    datagen.fit(x_train)
+    figs.append(plt.figure())
+    val_acc = history.history.get('val_acc')
+    if val_acc:
+      print('val_acc: %s' % val_acc)
+      plt.plot(val_acc)
+      plt.title('Validation Accuracy')
 
-    # Fit the model on the batches generated by datagen.flow().
-    history = model.fit_generator(datagen.flow(x_train, y_train,
-                                               batch_size=batch_size),
-                                  epochs=epochs,
-                                  validation_data=(x_test, y_test),
-                                  workers=4,
-                                  callbacks=callbacks)
+    if find_lr:
+      figs.append(plt.figure())
+      lr_find.plot()
+      plt.title('loss vs. learning rate (log)')
 
-# Save model and weights
-if not os.path.isdir(save_dir):
-  os.makedirs(save_dir)
-model_path = os.path.join(save_dir, model_name)
-model.save(model_path)
-print('Saved trained model at %s ' % model_path)
+      figs.append(plt.figure())
+      lr_find.plot_lr()
+      plt.title('learning rate vs. iterations')
 
-# Score trained model.
-scores = model.evaluate(x_test, y_test, verbose=1)
-print('Test loss:', scores[0])
-print('Test accuracy:', scores[1])
+    if show_plots:
+      plt.show()
 
-plot_grids(
-  x_test,
-  y_test.argmax(axis=1),
-  model.predict(x_test, verbose=1).argmax(axis=1)
-)
+    if save_plots:
+      n = 0
+      for i_fig, fig in enumerate(figs):
+        while True:
+          filename = 'out/prospector_%d_%d.png' % (n, i_fig)
+          if not os.path.exists(filename):
+            break
+          n += 1
+        print('Saving to file %s...' % filename)
+        plt.figure(fig.number)
+        plt.savefig(filename)
+        plt.close(fig)
 
-val_acc = history.history['val_acc']
-plt.plot(val_acc)
-plt.title('Validation Accuracy')
-plt.show()
+  return scores[1]
 
-import ipdb; ipdb.set_trace()
+'''
+norm_hack = True
+truncate_ratio = 0.2
+
+[(0.49324324324324326, {'decay': 1e-06, 'lr': 0.003}),
+ (0.5067567567567568, {'decay': 3e-07, 'lr': 0.003}),
+ (0.5067567567567568, {'decay': 3e-06, 'lr': 0.003}),
+ (0.5540540540540541, {'decay': 3e-06, 'lr': 3e-05}),
+ (0.5743243243243243, {'decay': 3e-07, 'lr': 3e-05}),
+ (0.595945945945946, {'decay': 1e-06, 'lr': 3e-05}),
+ (0.6324324324324324, {'decay': 3e-06, 'lr': 0.0001}),
+ (0.6337837837837837, {'decay': 1e-06, 'lr': 0.0001}),
+ (0.6567567567567567, {'decay': 3e-07, 'lr': 0.0001})]
+
+[(0.5324324317880579,
+  {'decay': 0,
+   'epochs': 10,
+   'featurewise_std_normalization': True,
+   'find_lr': False,
+   'log': False,
+   'lr': 1e-05,
+   'norm_bounds': None,
+   'norm_hack': False,
+   'stop_early': True,
+   'truncate_ratio': 0.5}),
+ (0.5405405415071024,
+  {'decay': 0,
+   'epochs': 10,
+   'featurewise_std_normalization': True,
+   'find_lr': False,
+   'log': False,
+   'lr': 1e-05,
+   'norm_bounds': None,
+   'norm_hack': True,
+   'stop_early': True,
+   'truncate_ratio': 0.5})]
+'''
+'''
+  {'decay': 3e-07,
+   'epochs': 10,
+   'featurewise_std_normalization': False,
+   'find_lr': False,
+   'log': False,
+   'lr': 0.0003,
+   'norm_bounds': (-14.0852577255, 144.4015012157),
+   'norm_hack': False,
+   'stop_early': True,
+   'truncate_ratio': None})]
+
+  {'decay': 3e-07,
+   'epochs': 10,
+   'featurewise_std_normalization': True,
+   'find_lr': False,
+   'log': False,
+   'lr': 0.0003,
+   'norm_bounds': (-14.0852577255, 144.4015012157),
+   'norm_hack': False,
+   'stop_early': True,
+   'truncate_ratio': None})
+'''
+
+def hyperopt():
+  from itertools import product
+
+  def param_sets():
+    param_grid = [
+      {
+ #(0.6567567567567567, {'decay': 3e-07, 'lr': 0.0001})]
+        #'lr': [0.00003, 0.0001, 0.003, 0.01],
+        #'decay': [0, 1e-3, 1e-6],
+        'log': [False],
+        #'norm_bounds': [(-10000, 10000), (-3000, 3000), (-1000, 1000), (-100, 100), (-10, 10)],
+        'truncate_ratio': [1],
+        'find_lr': [False],
+        'stop_early': [True],
+        'epochs': [10],
+        'lr': [3e-4],
+        'decay': [3e-7],
+        'norm_hack': [False],
+
+        'norm_bounds': [
+          (-14.0852577255, 144.4015012157),
+          (-10, 150),
+          (0, 255)
+        ],
+        'featurewise_std_normalization': [False, True],
+      }
+    ]
+    for p in param_grid:
+      items = sorted(p.items())
+      if not items:
+        yield {}
+      else:
+        keys, values = zip(*items)
+        for v in product(*values):
+          params = dict(zip(keys, v))
+          yield params
+  results = []
+  for param_set in param_sets():
+    if param_set:
+      print('param_set: %s' % param_set)
+      score = run(**param_set)
+      #score = np.random.random()
+      results.append((score, param_set))
+    else:
+      print('param set was None')
+  results.sort(key=lambda tup: tup[0])
+  from pprint import pprint
+  print('results:')
+  pprint(results)
+
+  results_fname = 'hyperparam-scores.txt'
+  with open(results_fname, 'w') as f:
+    f.write('\n' + pformat(results))
+  print('results written to %s' % results_fname)
+
+  import ipdb; ipdb.set_trace()
+
+if __name__ == '__main__':
+  hyperopt()

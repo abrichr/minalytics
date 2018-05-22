@@ -124,7 +124,7 @@ class GDALGrid(object):
 
     """
     def __init__(self, grid_file, prj_file=None,
-                 min_val_replacement=None, shift_to_zero=True):
+                 min_val_replacement=None, shift_to_zero=False):
         if isinstance(grid_file, gdal.Dataset):
             self.dataset = grid_file
         else:

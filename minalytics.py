@@ -1,5 +1,8 @@
 from __future__ import print_function
 
+# .gxf documentation:
+# http://www.geosoft.com/media/uploads/resources/technical-notes/gxfr3d9_1.pdf
+
 '''
 This script performs a regression in columns imported from an excel workbook,
 and the associated aeromagnetic data.
@@ -26,11 +29,14 @@ TODO:
 
 # This ratio is the number of empty values divided by the total number of rows
 # in a column. Columns which have too many empty values are ignored.
-MAX_EMPTY_RATIO = 0.7
+MAX_EMPTY_RATIO = 0.85
 
 # Any column whose name contains at least one of these words (case-insensitive)
 # is treated as a target for the regression.
-TARGET_COL_TERMS = ['capitalization', 'value']
+#TARGET_COL_TERMS = ['capitalization', 'value']
+
+# csvcut -c 101,102,103,104,105,106 snlworkbook_Combined_fixed.csv | csvstat
+TARGET_COL_TERMS = ['reserves', 'resources']
 # TODO: ignore 'total deal value (completion)'
 
 # If the Pearson Correlation Coefficient between a data column and any target
@@ -61,7 +67,13 @@ EXCEL_WORKBOOK_PATH = 'data/snlworkbook_Combined_fixed.xls'
 MAGNETIC_GRID_PATH = 'data/200 m mag deg.dat'
 
 # Path to magnetic grid file (binary)
+# NAD83
+# http://gdr.agg.nrcan.gc.ca/gdrdap/dap/search-eng.php?tree-0=Magnetic-Radiometric-EM+-+Magn%C3%A9tiques-Radioactivit%C3%A9-%C3%89M&tree-1=Compilations+-+Compilations&tree-2=Canada+-+200m+-+MAG&tree-3=Click+here+for+more+options&datatype-ddl=&layer_name=&submit_search=Submit+Search#results
 BINARY_MAGNETIC_GRID_PATH = 'data/d950396/Canada - 200m - MAG - Residual Total Field - Composante residuelle.grd.gxf'
+
+# GRS80
+# http://gdr.agg.nrcan.gc.ca/gdrdap/pdf/Gravity_Anomaly_description.pdf
+BINARY_GRAVITY_GRID_PATH = 'data/d250292/Canada 2 km - GRAV - Gravity Anomalies - Anomalies gravimetriques.grd.gxf'
 
 # Size of patch of magnetic data in metres
 MAG_PATCH_SIZE_M = 10000
@@ -149,7 +161,17 @@ def myrepr(arg):
   else:
     return repr(arg)
 
-cache = percache.Cache(".cache", livesync=True, repr=myrepr)
+try:
+  cache = percache.Cache(".cache", livesync=True, repr=myrepr)
+except:
+  def cache(func):
+    def wrapper(*args, **kwargs):
+      read_cache = kwargs.get('read_cache', True)
+      write_cache = kwargs.get('write_cache', True)
+      kwargs.pop('read_cache', None)
+      kwargs.pop('write_cache', None)
+      return func(*args, **kwargs)
+    return wrapper
 
 PY3 = sys.version_info >= (3, 0)
 EPS = np.finfo(np.float32).eps
@@ -400,7 +422,12 @@ def convert_cat_to_onehot(df, cols_by_type,
           len(new_cols), len(unique_vals))
   return df
 
-def remove_target_correlations(df, corr_thresh=CORR_THRESH):
+def remove_target_correlations(
+    df,
+    corr_thresh=CORR_THRESH,
+    target_col_terms=TARGET_COL_TERMS
+):
+  logger.debug('remove_target_correlations() target_col_terms: %s' % target_col_terms)
   corrs = df.corr().abs()
   cols = corrs.columns.values.tolist()
   corr_col_tups = []
@@ -416,8 +443,8 @@ def remove_target_correlations(df, corr_thresh=CORR_THRESH):
   for corr, col1, col2 in corr_col_tups:
     if corr < corr_thresh:
       continue
-    col1_is_target = any([word in col1.lower() for word in TARGET_COL_TERMS])
-    col2_is_target = any([word in col2.lower() for word in TARGET_COL_TERMS])
+    col1_is_target = any([word in col1.lower() for word in target_col_terms])
+    col2_is_target = any([word in col2.lower() for word in target_col_terms])
     # ignore correlations between target columns
     if col1_is_target and col2_is_target:
       continue
@@ -445,32 +472,46 @@ def remove_target_correlations(df, corr_thresh=CORR_THRESH):
 def get_target_cols(cols_by_type, col_terms=TARGET_COL_TERMS):
   target_cols = [col for col in cols_by_type[ColType.NUM]
                  if any(word in col.lower() for word in col_terms)]
-  logger.info('target_cols:\n\t%s' % '\n\t'.join(target_cols))
+  logger.info('get_target_cols() target_cols:\n\t%s' % '\n\t'.join(target_cols))
   return target_cols
 
-@cache
-def get_mine_data(keep_owner_cols=False):
+#@cache
+def get_mine_data(
+    keep_owner_cols=False,
+    target_col_terms=TARGET_COL_TERMS,
+    remove_empty_cols=True,
+    remove_target_correlations=True,
+    convert_to_onehot=True,
+    remove_text_cols=True
+):
   logger.info('Preparing data...')
+
+  logger.debug('get_mine_data() target_col_terms: %s' % target_col_terms)
   start_time = time.time()
 
   df = load_dataframe()
-  remove_empty_cols(df)
 
-  remove_target_correlations(df)
+  if remove_empty_cols:
+    remove_empty_cols(df)
+
+  if remove_target_correlations:
+    remove_target_correlations(df, target_col_terms=target_col_terms)
 
   cols_by_type = parse_cols(df)
 
-  target_cols = get_target_cols(cols_by_type)
+  target_cols = get_target_cols(cols_by_type, target_col_terms)
+  logger.debug('target_cols: %s' % target_cols)
 
-  logger.info('Converting multis...')
-  convert_multi_to_onehot(df, cols_by_type)
+  if convert_to_onehot:
+    logger.info('Converting multis...')
+    convert_multi_to_onehot(df, cols_by_type)
+    logger.info('Converting categories...')
+    ignore_cols = OWNER_COLS if keep_owner_cols else []
+    df = convert_cat_to_onehot(df, cols_by_type, ignore_cols=ignore_cols)
 
-  logger.info('Converting categories...')
-  ignore_cols = OWNER_COLS if keep_owner_cols else []
-  df = convert_cat_to_onehot(df, cols_by_type, ignore_cols=ignore_cols)
-
-  logger.info('Removing text columns...')
-  remove_columns(df, cols_by_type[ColType.TEXT])
+  if remove_text_cols:
+    logger.info('Removing text columns...')
+    remove_columns(df, cols_by_type[ColType.TEXT])
 
   for col, dtype in zip(df.columns, df.dtypes):
     logger.debug('dtype: %s, col: %s' % (dtype, col))
@@ -599,9 +640,18 @@ def get_mag_region(mag_df, pivot, row, lat_col, lon_col, box_size_m=MAG_PATCH_SI
   logger.info('patch.shape: %s' % str(patch.shape))
   return patch
 
-@cache
-def get_patch_from_grid(grid, lon, lat, patch_size_m=MAG_PATCH_SIZE_M):
-  logger.debug('get_patch_from_grid() lon: %s, lat: %s' % (lon, lat))
+#@cache
+def get_patch_from_grid(
+    grid,
+    lon,
+    lat,
+    mask_val=None,
+    fill_val=0,
+    patch_size_m=MAG_PATCH_SIZE_M,
+    return_idxs=False,
+    square_only=False
+):
+  logger.debug('get_patch_from_grid() lon: %s, lat: %s, mask_val: %s' % (lon, lat, mask_val))
 
   if np.isnan(lon) or np.isnan(lat):
     loggder.debug('lon/lat was nan')
@@ -609,8 +659,9 @@ def get_patch_from_grid(grid, lon, lat, patch_size_m=MAG_PATCH_SIZE_M):
 
   try:
     cx, cy = grid.lonlat2pixel(lon, lat)
-  except IndexError:
+  except IndexError as e:
     logger.debug('No patch at (lon, lat): (%s, %s)' % (lon, lat))
+    logger.debug('e: %s' % e)
     return None
 
   cols = int(patch_size_m / abs(grid.dx))
@@ -623,88 +674,66 @@ def get_patch_from_grid(grid, lon, lat, patch_size_m=MAG_PATCH_SIZE_M):
   x1 = min(cx+cols, arr.shape[1])
 
   patch = arr[x0:x1, y0:y1]
+  if square_only and patch.shape[0] != patch.shape[1]:
+    logger.debug('Patch was not square')
+    return None
   #logger.debug('patch.size: %s' % str(patch.size))
 
-  return patch
+  if mask_val is not None:
+    patch = np.ma.masked_equal(patch, mask_val).filled(fill_val)
 
-#@cache
-def get_full_data(max_rows=None, keep_owner_cols=False, show_patches=False):
-  df, cols_by_type, target_cols = get_mine_data(keep_owner_cols=keep_owner_cols)
-  lat_col, lon_col = get_lat_lon_cols(df.columns)
+  if return_idxs:
+    rval = (patch, x0, x1, y0, y1)
+  else:
+    rval = patch
 
-  grid = GDALGrid(BINARY_MAGNETIC_GRID_PATH, min_val_replacement=0)
-  import ipdb; ipdb.set_trace()
-
-  # compare with lon/lat values generated by Surfer
-  lonlat_by_xy = {
-      (-733200,-1532800): (-101.93015422684,48.448804001006),
-      (-733000,-1532800): (-101.92748929237,48.449083011348),
-      (-732800,-1532800): (-101.92482432276,48.449361947708)
-  }
-  for (x, y), (lon, lat) in lonlat_by_xy.items():
-    col, row = grid.coord2pixel(x, y)
-    _lon, _lat = grid.pixel2lonlat(col, row)
-    assert abs(lon - _lon) < 10**-5
-    assert abs(lat - _lat) < 10**-5
-
-  min_lon, max_lat = grid.pixel2lonlat(0, 0)
-  max_lon, min_lat = grid.pixel2lonlat(grid.x_size-1, grid.y_size-1)
-  logger.debug('min_lon: %s, max_lon: %s' % (min_lon, max_lon))
-  logger.debug('min_lat: %s, max_lat: %s' % (min_lat, max_lat))
-
-  try:
-    logger.debug('Removing rows without lat/lon...')
-    n0 = len(df)
-    df = df[pd.notnull(df[lat_col]) &
-            pd.notnull(df[lon_col])]
-    n1 = len(df)
-    logger.debug('Removed %d rows without lat/lon' % (n0 - n1))
-    logger.debug('Removing out of bounds...')
-    df = df[(df[lat_col] >= min_lat) &
-            (df[lat_col] <= max_lat) &
-            (df[lon_col] >= min_lon) &
-            (df[lon_col] <= max_lon)]
-    n2 = len(df)
-    logger.debug('Removed %d rows out of bounds' % (n1 - n2))
-    logger.debug('Resetting index...')
-    df = df.reset_index()
-  except Exception as e:
-    logger.warn('e:', e)
-    import ipdb; ipdb.set_trace()
-
-  patches = []
-  keep_idxs = []
-  logger.info('Extracting %d patches from grid...' % df.shape[0])
-  for i, row in df.iterrows():
-    logger.debug('extracting patch %d of %d' % (i, df.shape[0]))
-    patch = get_patch_from_grid(grid, row[lon_col], row[lat_col])
-    if patch is not None:
-      if show_patches:
-        plt.imshow(patch)
-        plt.show()
-      if len(set(patch.flatten())) > 1:
-        patches.append(patch)
-        keep_idxs.append(i)
-
-  df = df.iloc[keep_idxs]
-  assert len(df) == len(patches)
-
-  return patches, df, cols_by_type, target_cols
+  return rval
 
 @cache
-def get_full_data__old(max_rows=None, keep_owner_cols=False):
-  df, cols_by_type, target_cols = get_mine_data(keep_owner_cols=keep_owner_cols)
+def get_full_data(
+    max_rows=None,
+    keep_owner_cols=False,
+    target_col_terms=TARGET_COL_TERMS,
+    remove_empty_cols=False,
+    remove_target_correlations=False,
+    convert_to_onehot=False,
+    from_binary_grid=True,
+    patch_size_m=MAG_PATCH_SIZE_M
+):
+  df, cols_by_type, target_cols = get_mine_data(
+      keep_owner_cols=keep_owner_cols,
+      target_col_terms=target_col_terms,
+      remove_empty_cols=remove_empty_cols,
+      remove_target_correlations=remove_target_correlations,
+      convert_to_onehot=convert_to_onehot
+  )
   lat_col, lon_col = get_lat_lon_cols(df.columns)
 
-  mag_df = read_magnetic_data()
-  min_lat = min(mag_df.lat)
-  max_lat = max(mag_df.lat)
-  min_lon = min(mag_df.lon)
-  max_lon = max(mag_df.lon)
-  logger.debug('min_lat: %s' % min_lat)
-  logger.debug('max_lat: %s' % max_lat)
-  logger.debug('min_lon: %s' % min_lon)
-  logger.debug('max_lon: %s' % max_lon)
+  if from_binary_grid:
+    grid = GDALGrid(BINARY_MAGNETIC_GRID_PATH)
+    #import ipdb; ipdb.set_trace()
+
+    # compare with lon/lat values generated by Surfer
+    lonlat_by_xy = {
+        (-733200,-1532800): (-101.93015422684,48.448804001006),
+        (-733000,-1532800): (-101.92748929237,48.449083011348),
+        (-732800,-1532800): (-101.92482432276,48.449361947708)
+    }
+    for (x, y), (lon, lat) in lonlat_by_xy.items():
+      col, row = grid.coord2pixel(x, y)
+      _lon, _lat = grid.pixel2lonlat(col, row)
+      assert abs(lon - _lon) < 10**-5
+      assert abs(lat - _lat) < 10**-5
+    min_lon, max_lat = grid.pixel2lonlat(0, 0)
+    max_lon, min_lat = grid.pixel2lonlat(grid.x_size-1, grid.y_size-1)
+  else:
+    mag_df = read_magnetic_data()
+    min_lat = min(mag_df.lat)
+    max_lat = max(mag_df.lat)
+    min_lon = min(mag_df.lon)
+    max_lon = max(mag_df.lon)
+  logger.debug('lon: (%.2f, %.2f)' % (min_lon, max_lon))
+  logger.debug('lat: (%.2f, %.2f)' % (min_lat, max_lat))
 
   try:
     logger.info('Removing rows without lat/lon...')
@@ -726,20 +755,52 @@ def get_full_data__old(max_rows=None, keep_owner_cols=False):
     logger.warn('e:', e)
     import ipdb; ipdb.set_trace()
 
-  #df['mag'] = None  # set dtype to Object
-  patches = []
-  pivot = get_pivot(mag_df)
-  for i, row in df.iterrows():
-    if max_rows and i > max_rows:
-      break
-    logger.info('extracting magnetic region %d of %d' % (i, df.shape[0]))
-    try:
-      mag_region = get_mag_region(mag_df, pivot, row, lat_col, lon_col)
-      #df.at[0, 'mag'] = mag_region
-      patches.append(mag_region)
-    except Exception as e:
-      logger.warn('e:', e)
-      import ipdb; ipdb.set_trace()
+  if from_binary_grid:
+    @cache
+    def _get_patches(df, grid, lon_col, lat_col, show_patches=False):
+      patches = []
+      keep_idxs = []
+      min_val = grid.arr.min()
+      for i, row in df.iterrows():
+        logger.debug('extracting patch %d of %d' % (i, df.shape[0]))
+        patch = get_patch_from_grid(grid, row[lon_col], row[lat_col], min_val,
+            patch_size_m=MAG_PATCH_SIZE_M)
+        if patch is not None:
+          try:
+            print('patch.min():', patch.min())
+          except Exception as exc:
+            print('exc: %s' % exc)
+        if patch is not None:
+          if show_patches:
+            plt.imshow(patch)
+            plt.show()
+          try:
+            if len(set(patch.flatten())) > 1:
+              patches.append(patch)
+              keep_idxs.append(i)
+          except Exception as exc:
+            logger.error('Error: %s' % exc)
+            import ipdb; ipdb.set_trace()
+      return patches, keep_idxs
+    logger.info('Extracting %d patches from grid...' % df.shape[0])
+    patches, keep_idxs = _get_patches(df, grid, lon_col, lat_col, read_cache=False)
+    df = df.iloc[keep_idxs]
+    assert len(df) == len(patches)
+  else:
+    #df['mag'] = None  # set dtype to Object
+    patches = []
+    pivot = get_pivot(mag_df)
+    for i, row in df.iterrows():
+      if max_rows and i > max_rows:
+        break
+      logger.info('extracting magnetic region %d of %d' % (i, df.shape[0]))
+      try:
+        mag_region = get_mag_region(mag_df, pivot, row, lat_col, lon_col)
+        #df.at[0, 'mag'] = mag_region
+        patches.append(mag_region)
+      except Exception as e:
+        logger.warn('e:', e)
+        import ipdb; ipdb.set_trace()
 
   return patches, df, cols_by_type, target_cols
 
@@ -811,7 +872,7 @@ def get_magnetic_features(df, patches, num_pca_components=NUM_PCA_COMPONENTS):
   return feats
 
 def do_magnetic_regression():
-  patches, df, cols_by_type, target_cols = get_full_data__old()
+  patches, df, cols_by_type, target_cols = get_full_data()
   feats = get_magnetic_features(df, patches)
   for name, vals in feats.items():
     logger.info('name: %s val: %s' % (name, vals[0]))
@@ -1132,7 +1193,7 @@ def do_autoencoder():
 def _get_patch_masks(patches, show=False, majority_only=False):
   rval = []
   for i, patch in enumerate(patches):
-    logger.debug('patch %d of %d' % (i, len(patches)))
+    logger.debug('_get_patch_masks() patch %d of %d' % (i, len(patches)))
     im = patch
     im -= im.min()
     im /= im.max()
@@ -1211,7 +1272,7 @@ def _get_mask_feats(patches, masks, feat_names=None):
   return feats
 
 def do_blob_regression():
-  patches, df, cols_by_type, target_cols = get_full_data__old()
+  patches, df, cols_by_type, target_cols = get_full_data()
   logger.info('Getting masks...')
   masks = _get_patch_masks(patches, majority_only=True)
   mask_feats = _get_mask_feats(patches, masks, ['sum'])
@@ -1250,7 +1311,7 @@ def _remove_na(vals):
   vals = [v for v, na in zip(vals, isna) if not na]
   return np.array(vals)
 
-def plot_mask_sum_vs_mkt_cap(
+def plot_mask_sum_vs_target(
     annotate=False,
     show=False,
     save=True,
@@ -1263,17 +1324,23 @@ def plot_mask_sum_vs_mkt_cap(
     min_by_targ={
       #'Total Deal Value (Announcement) Deal 1 (Reported)': 250
     },
-    bin_split_ratios=[0.001, 0.01, 0.1],
+    #bin_split_ratios=[0.0001, 0.001, 0.01, 0.1],
+    bin_split_ratios=[1],
     get_full_data_fn=get_full_data
 ):
   # TODO: refactor
   patches, df, cols_by_type, target_cols = get_full_data_fn(
-      keep_owner_cols=group_by_owner)
+      keep_owner_cols=group_by_owner,
+      read_cache=False,
+      return_grid=False
+  )
+  logger.debug('Got %d patches' % len(patches))
   lat_col, lon_col = get_lat_lon_cols(df)
   logger.info('Getting masks...')
   masks = _get_patch_masks(patches, majority_only=True)
+  logger.debug('len(masks): %s' % len(masks))
   mask_feats = _get_mask_feats(patches, masks)
-  #logger.debug('mask_feats: %s' % pformat(mask_feats))
+  logger.debug('len(mask_feats): %s' % len(mask_feats))
   sums = mask_feats['majority_sum']
   #TODO: get rid of area
   areas = mask_feats['majority_area']
@@ -1298,6 +1365,15 @@ def plot_mask_sum_vs_mkt_cap(
     sums = sum_sums
     areas = area_sums
   df_orig = df
+
+  # binning
+  bin_split_ratios = sorted(bin_split_ratios)
+  assert bin_split_ratios[-1] <= 1
+  if bin_split_ratios[-1] != 1:
+    bin_split_ratios.append(1)
+  logger.debug('bin_split_ratios: %s' % bin_split_ratios)
+
+  logger.debug('target_cols: %s' % target_cols)
   for i, target_col in enumerate(target_cols):
     df = df_orig
     logger.info('target_col: %s' % target_col)
@@ -1365,11 +1441,6 @@ def plot_mask_sum_vs_mkt_cap(
     y_min = y.min()
     y_max = y.max()
     y_range = y_max - y_min
-    bin_split_ratios = sorted(bin_split_ratios)
-    assert bin_split_ratios[-1] <= 1
-    if bin_split_ratios[-1] != 1:
-      bin_split_ratios.append(1)
-    logger.debug('bin_split_ratios: %s' % bin_split_ratios)
     prev_bin_split = y_min
     for bin_split_ratio in bin_split_ratios:
       bin_split = y_range * bin_split_ratio
@@ -1386,9 +1457,10 @@ def plot_mask_sum_vs_mkt_cap(
       prev_bin_split = bin_split
 
     n_bins = len(bin_split_ratios)
-    fontsize = 6
+    fontsize = 5
     plt.figure()
-    for i_bin, (X_bin, y_bin) in enumerate(zip(X_bins, y_bins)):
+    plt.xticks(fontsize=fontsize)
+    for i_bin, (X_bin, y_bin) in enumerate(zip(X_bins[::-1], y_bins[::-1])):
       plt.subplot(n_bins, 1, i_bin+1)
 
       plt.scatter(X_bin, y_bin)
@@ -1411,7 +1483,8 @@ def plot_mask_sum_vs_mkt_cap(
       try:
         reg.fit(X_bin, y_bin)
       except Exception as e:
-        import ipdb; ipdb.set_trace()
+        #import ipdb; ipdb.set_trace()
+        continue
 
       score = reg.score(X_bin, y_bin)
 
@@ -1424,8 +1497,8 @@ def plot_mask_sum_vs_mkt_cap(
         title = '%s\nR2=%.4f\nR2_cv=%.4f' % (title, score, cross_val_score)
         plt.title(title, fontsize=fontsize)
         plt.plot(X_bin, reg.predict(X_bin), color='k')
-      except:
-        pass
+      except Exception as e:
+        print('exception: %s' % e)
 
     figure = plt.gcf()
     figure.set_size_inches(8, 6)
@@ -1442,19 +1515,37 @@ def plot_mask_sum_vs_mkt_cap(
       plt.savefig(filename, dpi=100)
 
   if save_vals:
-    # XXX does not work with binning
-    logger.info('Saving mine magnetic values to %s' % MINE_MAG_VAL_PATH)
-    with open(MINE_MAG_VAL_PATH, 'w') as csvfile:
-      fieldnames = 'id latitude longitude magsum'.split()
-      writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-      writer.writeheader()
-      logger.info('len(df): %s' % len(df))
-      logger.info('len(this_sums): %s' % len(this_sums))
-      for _id, lat, lon, mag in zip(df[ID_COL], df[lat_col], df[lon_col], this_sums):
-        writer.writerow({'id': int(_id), 'latitude': lat, 'longitude': lon, 'magsum': mag})
+    try:
+      logger.info('Saving mine magnetic values to %s' % MINE_MAG_VAL_PATH)
 
-def plot_mask_sum_vs_mkt_cap_grouped():
-  plot_mask_sum_vs_mkt_cap(group_by_owner=True)
+      # XXX does not work with binning
+      assert bin_split_ratios == [1], "Can't write mag vals with binning"
+
+      with open(MINE_MAG_VAL_PATH, 'w') as csvfile:
+        fieldnames = 'id latitude longitude magsum'.split()
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        writer.writeheader()
+        logger.info('len(df_orig): %s' % len(df_orig))
+        logger.info('len(sums): %s' % len(sums))
+        for _id, lat, lon, mag in zip(
+            df_orig[ID_COL],
+            df_orig[lat_col],
+            df_orig[lon_col],
+            sums
+        ):
+          writer.writerow({
+            'id': int(_id),
+            'latitude': lat,
+            'longitude': lon,
+            'magsum': mag
+          })
+    except Exception as e:
+      logger.error('Exception: %s' % e)
+
+  import ipdb; ipdb.set_trace()
+
+def plot_mask_sum_vs_target_grouped():
+  plot_mask_sum_vs_target(group_by_owner=True)
 
 def print_stats():
   mag_df = read_magnetic_data()
@@ -1466,6 +1557,206 @@ def print_stats():
   logger.info('max_lat: %s' % max_lat)
   logger.info('min_lon: %s' % min_lon)
   logger.info('max_lon: %s' % max_lon)
+
+def compare_grids():
+
+  import affine
+
+  def pixel_from_coord(lon, lat, data_source):
+    return px, py
+
+  from osgeo import gdal, gdalconst
+  grids = [gdal.Open(path, gdalconst.GA_ReadOnly) for path in [
+    BINARY_GRAVITY_GRID_PATH,
+    BINARY_MAGNETIC_GRID_PATH,
+  ]]
+
+  import ipdb; ipdb.set_trace()
+
+  lon, lat = -78.1271, 48.1366
+  m = 2000000
+  for grid in grids:
+
+    def xy2lonlat(x, y, grid):
+      gt = grid.GetGeoTransform()
+      x0, pw, ry, y0, rx, ph = gt
+      lon = x0 + x*dx + y*ry
+      lat = y0 + x*rx + y*ph
+      return lon, lat
+
+    forward_transform = affine.Affine.from_gdal(*grid.GetGeoTransform())
+    reverse_transform = ~forward_transform
+    col, row = reverse_transform * (lon, lat)
+    col, row = int(col + 0.5), int(row + 0.5)
+    print('%s, %s' % (col, row))
+
+    _, dx, _, _, _, dy = grid.GetGeoTransform()
+    dx = abs(dx)
+    dy = abs(dy)
+    cols = m / dx
+    rows = m / dy
+
+    x0 = int(col - cols / 2)
+    x1 = int(col + cols / 2)
+    y0 = int(row - rows / 2)
+    y1 = int(row + rows / 2)
+
+    x0 = 476
+    x1 = 645
+    y0 = 743
+    y1 = 928
+
+    print('%s:%s, %s:%s' % (x0, x1, y0, y1))
+    arr = grid.ReadAsArray()
+
+    if abs(dx) == 200:
+      print('striding')
+      arr = arr[::10,::10]
+
+    print('arr.shape: %s' % str(arr.shape))
+    arr = np.ma.masked_values(arr, arr.min())
+    #arr[arr == arr.min()] = 0
+    arr -= arr.min()
+    arr /= arr.max()
+    arr[y0:y1, x0:x1] = arr.min()
+    plt.figure()
+    plt.imshow(arr)
+  plt.show()
+
+  return
+
+
+  from mpl_toolkits.basemap import Basemap
+  '''
+  magnetic grid top    left  (lon, lat, x, y):(-179.49,61.12 -3265200.0 2479200.0)
+  magnetic grid top    right (lon, lat, x, y):(-4.86,  61.95 3174200.0  2479200.0)
+  magnetic grid bottom left  (lon, lat, x, y):(-126.18,34.05 -3265200.0 -2353600.0)
+  magnetic grid bottom right (lon, lat, x, y):(-58.60, 34.43 3174200.0  -2353600.0)
+  gravity grid top     left  (lon, lat, x, y):(173.11, 64.53 -2936000.0 4282000.0)
+  gravity grid top     right (lon, lat, x, y):(-0.69,  52.84 4214000.0  4282000.0)
+  gravity grid bottom  left  (lon, lat, x, y):(-123.65,31.04 -2936000.0 -1418000.0)
+  gravity grid bottom  right (lon, lat, x, y):(-56.41, 25.90 4214000.0  -1418000.0)
+  gravity csv min_lon: -186.89  max_lon: -0.69
+  gravity csv min_lat: 25.90,   max_lat: 87.41
+  gravity csv min_x: -2936000.00        max_x: 4214000.00
+  gravity csv min_y: -1418000.00,       max_y: 4282000.00
+  '''
+  map_by_name = {
+    'grav': {
+      #'fname': BINARY_GRAVITY_GRID_PATH,
+      'llcrnrlon': -123.65,
+      'llcrnrlat': 31.04,
+      'urcrnrlon': -0.69,
+      'urcrnrlat': 52.84,
+      'lat_0': 49,
+      'lon_0': -95,
+    },
+    'grav_csv': {
+      'llcrnrlon': -186.89,
+      'llcrnrlat': 25.90,
+      'urcrnrlon': -0.69,
+      'urcrnrlat': 87.41,
+      #'lat_0': 63,
+      #'lon_0': -92,
+    },
+    'mag': {
+      #'fname': BINARY_MAGNETIC_GRID_PATH,
+      'llcrnrlon': -126.18,
+      'llcrnrlat': 34.05,
+      'urcrnrlon': -4.86,
+      'urcrnrlat': 61.95,
+      'lat_0': 63,
+      'lon_0': -92,
+    },
+    'mag_xml': {
+      #'fname': BINARY_MAGNETIC_GRID_PATH,
+      'llcrnrlon': -179.49,
+      'llcrnrlat': 34.05,
+      'urcrnrlon': -4.86,
+      'urcrnrlat': 85.22,
+      'lat_0': 63,
+      'lon_0': -92,
+    },
+    'test': {
+      'lat_0': 10,
+      'lon_0': 0,
+      'width': 10000000,
+      'height': 10000000
+    }
+  }
+  for i, (map_name, map_args) in enumerate(map_by_name.items()):
+    #plt.subplot(len(map_by_name),1,i+1)
+    plt.figure()
+    map_args['projection'] = 'lcc'
+    m = Basemap(**map_args)
+    # draw coastlines, meridians and parallels.
+    m.drawcoastlines()
+    m.drawcountries()
+    m.drawmapboundary(fill_color='#99ffff')
+    m.fillcontinents(color='#cc9966',lake_color='#99ffff')
+    if 'llcrnrlat' in map_args:
+      m.drawparallels(
+          np.arange(
+            map_args['llcrnrlat'],
+            map_args['urcrnrlat'],
+            20
+          ),
+          labels=[1,0,0,1]
+      )
+      m.drawmeridians(
+          np.arange(
+            map_args['llcrnrlon'],
+            map_args['urcrnrlon'],
+            20
+          ),
+          labels=[1,0,0,1]
+      )
+    plt.title(map_name)
+  plt.show()
+
+  import ipdb; ipdb.set_trace()
+
+  grid_mag = GDALGrid(BINARY_MAGNETIC_GRID_PATH)
+  grid_grv = GDALGrid(BINARY_GRAVITY_GRID_PATH)
+
+  for grid_name, grid in (('magnetic', grid_mag), ('gravity', grid_grv)):
+    colrow_by_name = {
+      'top \tleft': (0, 0),
+      'top \tright': (grid.x_size-1, 0),
+      'bottom \tleft': (0, grid.y_size-1),
+      'bottom \tright': (grid.x_size-1, grid.y_size-1)
+    }
+    for name, (col, row) in colrow_by_name.items():
+      lon, lat = grid.pixel2lonlat(col, row)
+      x, y = grid.pixel2coord(col, row)
+      logger.info('%s grid %s \t(lon, lat, x, y): \t(%.2f, \t%.2f\t%s\t%s)' % (
+        grid_name, name, lon, lat, x, y))
+
+  _df = pd.read_csv(
+    'data/2km gravity anomalies_converted.csv',
+    sep=',',
+    header=None,
+    names='x y mag lon lat'.split(),
+    dtype={
+      'x': np.int64,
+      'y': np.int64,
+      'mag': np.float64,
+      'lat': np.float64,
+      'lon': np.float64
+    }
+  )
+  min_lat = _df.lat.min()
+  max_lat = _df.lat.max()
+  min_lon = _df.lon.min()
+  max_lon = _df.lon.max()
+  min_x = _df.x.min()
+  min_y = _df.y.min()
+  max_x = _df.x.max()
+  max_y = _df.y.max()
+  logger.debug('gravity csv min_lon: %.2f \tmax_lon: %.2f' % (min_lon, max_lon))
+  logger.debug('gravity csv min_lat: %.2f,\tmax_lat: %.2f' % (min_lat, max_lat))
+  logger.debug('gravity csv min_x: %.2f \tmax_x: %.2f' % (min_x, max_x))
+  logger.debug('gravity csv min_y: %.2f,\tmax_y: %.2f' % (min_y, max_y))
 
 if __name__ == '__main__':
   parser = argparse.ArgumentParser()
@@ -1521,6 +1812,14 @@ if __name__ == '__main__':
       '--magnetic',
       help='Read geomagnetic data',
       action='store_true')
+  parser.add_argument(
+      '--compare',
+      help='Compare binary grids for gravity and magnetism',
+      action='store_true')
+  parser.add_argument(
+      '--cmd',
+      help='Compare magnetic data implementations',
+      action='store_true')
 
   args = parser.parse_args()
 
@@ -1556,13 +1855,19 @@ if __name__ == '__main__':
     do_blob_test()
 
   if args.l:
-    plot_mask_sum_vs_mkt_cap()
+    plot_mask_sum_vs_target()
 
   if args.g:
-    plot_mask_sum_vs_mkt_cap_grouped()
+    plot_mask_sum_vs_target_grouped()
 
   if args.stats:
     print_stats()
 
   if args.magnetic:
     data = read_magnetic_data()
+
+  if args.compare:
+    compare_grids()
+
+  if args.cmd:
+    compare_magnetic_data()
