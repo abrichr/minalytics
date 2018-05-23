@@ -7,9 +7,16 @@ TODO:
     https://github.com/romanegloo/deepsat 
     https://github.com/kkgadiraju/SAT-Classification-Using-CNN
 '''
+
+import random
+random.seed(123)
+import numpy as np
+np.random.seed(123)
+import tensorflow as tf
+tf.set_random_seed(123)
+
 import keras
 import math
-import numpy as np
 import os
 from keras.callbacks import ModelCheckpoint, LambdaCallback, Callback
 from keras.datasets import cifar10
@@ -360,39 +367,37 @@ def run(
     callbacks.append(lr_find)
 
   class MyCallback(Callback):
+
     def __init__(self, model):
+      self.epoch = 0
       self.model = model
-      self.layer_weights_by_epoch = {}
-    def on_epoch_end(self, epoch, logs=None):
-      try:
-        assert epoch not in self.layer_weights_by_epoch
-      except Exception as exc:
-        import ipdb; ipdb.set_trace()
-        foo = 1
-      self.layer_weights_by_epoch[epoch] = []
-      for i_layer, layer in enumerate(model.layers):
-        weights = layer.get_weights()
-        if weights:
-          self.layer_weights_by_epoch[epoch].append(weights)
+      self.stat_funcs_by_name = {
+        'min': np.min,
+        'max': np.max,
+        'mean': np.mean,
+        'std': np.std
+      }
+      self.stats_by_name = {
+        name: [] for name in self.stat_funcs_by_name.keys()
+      }
+
+    def on_batch_end(self, batch, logs=None):
+      flat_weights = []
+      weights = self.model.get_weights()
+      for layer_weights in weights:
+        flat_weights.append(layer_weights.flatten())
+      for stat_name, stat_func in self.stat_funcs_by_name.items():
+        stat_val = stat_func(np.concatenate(flat_weights))
+        self.stats_by_name[stat_name].append(stat_val)
+
     def print_weight_stats(self):
       from hipsterplot import plot
-      stats_by_layer_group = {}
       try:
-        for epoch, layer_weights in self.layer_weights_by_epoch.items():
-          for i_layer, weights in enumerate(layer_weights):
-            stats_by_layer_group.setdefault(i_layer, {})
-            for i_group, w in enumerate(weights):
-              stats_by_layer_group[i_layer].setdefault(i_group, [])
-              stats_by_layer_group[i_layer][i_group].append((w.min(), w.max(), w.mean(), w.std()))
-              print('epoch: %s, layer: %s, group: %.5f, min: %.5f, max: %.5f, mean: %.5f' % (epoch, i_layer, i_group, w.min(), w.max(), w.mean()))
-        for i_layer in stats_by_layer_group:
-          for i_group in stats_by_layer_group[i_layer]:
-            stats = stats_by_layer_group[i_layer][i_group]
-            for name, vals in zip(('min', 'max', 'mean', 'std'), stats):
-              print('*' * 80)
-              print('layer %s, group %s, %s' % (i_layer, i_group, name))
-              plot(vals)
-              print('*' * 80)
+        for stat_name, stat_vals in self.stats_by_name.items():
+          print('*' * 90)
+          print('%s:' % stat_name)
+          plot(stat_vals)
+          print('*' * 90)
       except Exception as exc:
         import traceback
         traceback.print_exc()
@@ -605,12 +610,12 @@ def hyperopt():
         'epochs': [10],
         'lr': [3e-4],
         'decay': [3e-7],
+        # XXX try nearby: 254, 255, 256...
         'norm_hack': [False],
 
         'norm_bounds': [
           (-14.0852577255, 144.4015012157),
-          (-10, 150),
-          (0, 255)
+          (-14.1, 144.4),
         ],
         'featurewise_std_normalization': [False, True],
       }
@@ -639,7 +644,7 @@ def hyperopt():
   pprint(results)
 
   results_fname = 'hyperparam-scores.txt'
-  with open(results_fname, 'w') as f:
+  with open(results_fname, 'a+') as f:
     f.write('\n' + pformat(results))
   print('results written to %s' % results_fname)
 
