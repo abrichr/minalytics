@@ -18,6 +18,7 @@ tf.set_random_seed(123)
 import keras
 import math
 import os
+from hipsterplot import plot as hipplot
 from keras.callbacks import ModelCheckpoint, LambdaCallback, Callback
 from keras.datasets import cifar10
 from keras.layers import Dense, Dropout, Activation, Flatten
@@ -221,6 +222,8 @@ def run(
 
     featurewise_center=False,
     featurewise_std_normalization=False,
+
+    double_layers=True
 ):
 
   (x_train, y_train), (x_test, y_test) = load_data(
@@ -295,12 +298,13 @@ def run(
   model.add(MaxPooling2D(pool_size=(2, 2)))
   model.add(Dropout(0.25))
 
-  model.add(Conv2D(64, (3, 3), padding='same'))
-  model.add(Activation('relu'))
-  model.add(Conv2D(64, (3, 3)))
-  model.add(Activation('relu'))
-  model.add(MaxPooling2D(pool_size=(2, 2)))
-  model.add(Dropout(0.25))
+  if double_layers:
+    model.add(Conv2D(64, (3, 3), padding='same'))
+    model.add(Activation('relu'))
+    model.add(Conv2D(64, (3, 3)))
+    model.add(Activation('relu'))
+    model.add(MaxPooling2D(pool_size=(2, 2)))
+    model.add(Dropout(0.25))
 
   model.add(Flatten())
   model.add(Dense(512))
@@ -390,13 +394,13 @@ def run(
         stat_val = stat_func(np.concatenate(flat_weights))
         self.stats_by_name[stat_name].append(stat_val)
 
+    # TODO: plot learning curves
     def print_weight_stats(self):
-      from hipsterplot import plot
       try:
         for stat_name, stat_vals in self.stats_by_name.items():
           print('*' * 90)
           print('%s:' % stat_name)
-          plot(stat_vals)
+          hipplot(stat_vals)
           print('*' * 90)
       except Exception as exc:
         import traceback
@@ -487,48 +491,75 @@ def run(
   print('Test loss:', scores[0])
   print('Test accuracy:', scores[1])
 
-  if show_plots or save_plots:
-    figs = []
+  figs = []
 
-    '''
-    figs += plot_grids(
-      x_test,
-      y_test.argmax(axis=1),
-      model.predict(x_test, verbose=1).argmax(axis=1)
-    )
-    '''
+  '''
+  figs += plot_grids(
+    x_test,
+    y_test.argmax(axis=1),
+    model.predict(x_test, verbose=1).argmax(axis=1)
+  )
+  '''
+
+  figs.append(plt.figure())
+  acc = history.history.get('acc')
+  loss = history.history.get('loss')
+  val_acc = history.history.get('val_acc')
+  val_loss = history.history.get('val_loss')
+
+  if acc or loss or val_acc or val_loss:
+    print('acc: %s' % acc)
+    hipplot(acc)
+    print('loss: %s' % loss)
+    hipplot(loss)
+    print('val_acc: %s' % val_acc)
+    hipplot(val_acc)
+    print('val_loss: %s' % val_loss)
+    hipplot(val_loss)
+    assert len(acc) == len(loss) == len(val_acc) == len(val_loss)
+    get_x = lambda y: np.linspace(0, len(y), num=len(y))
+    figs.append(plt.figure())
+    try:
+      handles = [
+        plt.plot(get_x(acc), acc, label='acc'),
+        plt.plot(get_x(loss), loss, label='loss'),
+        plt.plot(get_x(val_acc), val_acc, label='val_acc'),
+        plt.plot(get_x(val_loss), val_loss, label='val_loss')
+      ]
+    except Exception as exc:
+      import ipdb; ipdb.set_trace()
+      foo = 1
+    plt.legend(handles)
+
+  if find_lr:
+    figs.append(plt.figure())
+    lr_find.plot()
+    plt.title('loss vs. learning rate (log)')
 
     figs.append(plt.figure())
-    val_acc = history.history.get('val_acc')
-    if val_acc:
-      print('val_acc: %s' % val_acc)
-      plt.plot(val_acc)
-      plt.title('Validation Accuracy')
+    lr_find.plot_lr()
+    plt.title('learning rate vs. iterations')
 
-    if find_lr:
-      figs.append(plt.figure())
-      lr_find.plot()
-      plt.title('loss vs. learning rate (log)')
+  # TODO: show plots non-blocking
+  # https://stackoverflow.com/questions/28269157/
+  if show_plots:
+    plt.show()
 
-      figs.append(plt.figure())
-      lr_find.plot_lr()
-      plt.title('learning rate vs. iterations')
-
-    if show_plots:
-      plt.show()
-
-    if save_plots:
-      n = 0
-      for i_fig, fig in enumerate(figs):
-        while True:
-          filename = 'out/prospector_%d_%d.png' % (n, i_fig)
-          if not os.path.exists(filename):
-            break
-          n += 1
-        print('Saving to file %s...' % filename)
-        plt.figure(fig.number)
-        plt.savefig(filename)
-        plt.close(fig)
+  if save_plots:
+    import inspect
+    import hashlib
+    frame = inspect.currentframe()
+    args, _, _, values = inspect.getargvalues(frame)
+    params = [(i, values[i]) for i in args]
+    params.sort(key=lambda tup: tup[0])
+    digest = hashlib.sha224(str(params).encode('utf-8')).hexdigest()
+    # TODO: print params in title
+    for i_fig, fig in enumerate(figs):
+      filename = 'out/prospector_%s_%d.png' % (digest, i_fig)
+      print('Saving to file %s...' % filename)
+      plt.figure(fig.number)
+      plt.savefig(filename)
+      plt.close(fig)
 
   return scores[1]
 
@@ -608,14 +639,17 @@ def hyperopt():
         'find_lr': [False],
         'stop_early': [True],
         'epochs': [10],
-        'lr': [3e-4],
+        'lr': [1e-4, 3e-4],
         'decay': [3e-7],
-        # XXX try nearby: 254, 255, 256...
         'norm_hack': [False],
+        'double_layers': [True],
 
         'norm_bounds': [
-          (-14.0852577255, 144.4015012157),
-          (-14.1, 144.4),
+          (-14.06, 144.2),
+          (-14.07, 144.3),
+          (-14.08, 144.4),
+          #(-14.0852577255, 144.4015012157),
+          #(-14.1, 144.4),
         ],
         'featurewise_std_normalization': [False, True],
       }
@@ -645,7 +679,9 @@ def hyperopt():
 
   results_fname = 'hyperparam-scores.txt'
   with open(results_fname, 'a+') as f:
-    f.write('\n' + pformat(results))
+    filehandle.seek(-1, os.SEEK_END)
+    filehandle.truncate()
+    f.write(',\n' + pformat(results)[1:])
   print('results written to %s' % results_fname)
 
   import ipdb; ipdb.set_trace()
