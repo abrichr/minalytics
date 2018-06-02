@@ -673,7 +673,7 @@ def hyperopt():
 
   results_fname = 'hyperparam-scores.txt'
   with open(results_fname, 'a+') as f:
-    filehandle.seek(-1, os.SEEK_END)
+    f.seek(-1, os.SEEK_END)
     filehandle.truncate()
     f.write(',\n' + pformat(results)[1:])
   print('results written to %s' % results_fname)
