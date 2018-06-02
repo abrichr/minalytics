@@ -129,7 +129,6 @@ from gdal_grid import GDALGrid
 from collections import Counter
 from functools import partial
 from matplotlib import cm
-from mpl_toolkits.mplot3d import Axes3D
 from pprint import pprint, pformat
 from sklearn import preprocessing, metrics, linear_model, model_selection
 from sklearn.decomposition import PCA, KernelPCA
