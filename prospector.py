@@ -228,7 +228,8 @@ def run(
 
     rotation_range=0,
 
-    batch_norm=True
+    batch_norm=True,
+    reduce_lr_on_plateau=True
 ):
 
   (x_train, y_train), (x_test, y_test) = load_data(
@@ -380,6 +381,10 @@ def run(
   if find_lr:
     lr_find = LR_Find(len(x_train) / batch_size)
     callbacks.append(lr_find)
+
+  if reduce_lr_on_plateau:
+    lr_plateau = keras.callbacks.ReduceLROnPlateau()
+    callbacks.append(lr_plateau)
 
   class MyCallback(Callback):
 
@@ -655,7 +660,8 @@ def hyperopt():
         ],
         'featurewise_std_normalization': [False],
         'rotation_range': [180],
-        'batch_norm': [True]
+        'batch_norm': [True],
+        'reduce_lr_on_plateau': [True]
       }
     ]
     for p in param_grid:
