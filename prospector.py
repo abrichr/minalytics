@@ -23,6 +23,7 @@ from keras.callbacks import ModelCheckpoint, LambdaCallback, Callback
 from keras.datasets import cifar10
 from keras.layers import Dense, Dropout, Activation, Flatten
 from keras.layers import Conv2D, MaxPooling2D
+from keras.layers.normalization import BatchNormalization
 from keras.models import Sequential
 from keras.preprocessing.image import ImageDataGenerator
 from matplotlib import pyplot as plt
@@ -225,7 +226,9 @@ def run(
 
     double_layers=True,
 
-    rotation_range=0
+    rotation_range=0,
+
+    batch_norm=True
 ):
 
   (x_train, y_train), (x_test, y_test) = load_data(
@@ -295,6 +298,8 @@ def run(
   model.add(Conv2D(32, (3, 3), padding='same',
                    input_shape=x_train.shape[1:]))
   model.add(Activation('relu'))
+  if batch_norm:
+    model.add(BatchNormalization())
   model.add(Conv2D(32, (3, 3)))
   model.add(Activation('relu'))
   model.add(MaxPooling2D(pool_size=(2, 2)))
@@ -303,6 +308,8 @@ def run(
   if double_layers:
     model.add(Conv2D(64, (3, 3), padding='same'))
     model.add(Activation('relu'))
+    if batch_norm:
+      model.add(BatchNormalization())
     model.add(Conv2D(64, (3, 3)))
     model.add(Activation('relu'))
     model.add(MaxPooling2D(pool_size=(2, 2)))
@@ -310,6 +317,8 @@ def run(
 
   model.add(Flatten())
   model.add(Dense(512))
+  if batch_norm:
+    model.add(BatchNormalization())
   model.add(Activation('relu'))
   model.add(Dropout(0.5))
   model.add(Dense(num_classes))
@@ -645,7 +654,8 @@ def hyperopt():
           (-14.07, 144.3),
         ],
         'featurewise_std_normalization': [False],
-        'rotation_range': [180]
+        'rotation_range': [180],
+        'batch_norm': [True]
       }
     ]
     for p in param_grid:
