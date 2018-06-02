@@ -223,7 +223,9 @@ def run(
     featurewise_center=False,
     featurewise_std_normalization=False,
 
-    double_layers=True
+    double_layers=True,
+
+    rotation_range=0
 ):
 
   (x_train, y_train), (x_test, y_test) = load_data(
@@ -444,7 +446,7 @@ def run(
           # apply ZCA whitening
           zca_whitening=False,
           # randomly rotate images in the range (degrees, 0 to 180)
-          rotation_range=0,
+          rotation_range=rotation_range,
           # randomly shift images horizontally (fraction of total width)
           width_shift_range=0.1,
           # randomly shift images vertically (fraction of total height)
@@ -630,28 +632,20 @@ def hyperopt():
   def param_sets():
     param_grid = [
       {
- #(0.6567567567567567, {'decay': 3e-07, 'lr': 0.0001})]
-        #'lr': [0.00003, 0.0001, 0.003, 0.01],
-        #'decay': [0, 1e-3, 1e-6],
         'log': [False],
-        #'norm_bounds': [(-10000, 10000), (-3000, 3000), (-1000, 1000), (-100, 100), (-10, 10)],
         'truncate_ratio': [1],
         'find_lr': [False],
         'stop_early': [True],
         'epochs': [10],
-        'lr': [1e-4, 3e-4],
+        'lr': [3e-4],
         'decay': [3e-7],
         'norm_hack': [False],
         'double_layers': [True],
-
         'norm_bounds': [
-          (-14.06, 144.2),
           (-14.07, 144.3),
-          (-14.08, 144.4),
-          #(-14.0852577255, 144.4015012157),
-          #(-14.1, 144.4),
         ],
-        'featurewise_std_normalization': [False, True],
+        'featurewise_std_normalization': [False],
+        'rotation_range': [180]
       }
     ]
     for p in param_grid:
