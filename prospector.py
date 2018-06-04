@@ -510,7 +510,8 @@ def run(
                                     workers=4,
                                     callbacks=callbacks)
 
-  mcb.print_weight_stats()
+  if record_stats:
+    mcb.print_weight_stats()
 
   # Save model and weights
   if save_final_model:
