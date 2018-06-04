@@ -550,15 +550,14 @@ def run(
     figs.append(plt.figure())
     try:
       handles = [
-        plt.plot(get_x(acc), acc, label='acc'),
-        plt.plot(get_x(loss), loss, label='loss'),
-        plt.plot(get_x(val_acc), val_acc, label='val_acc'),
-        plt.plot(get_x(val_loss), val_loss, label='val_loss')
+        plt.plot(get_x(acc), acc, label='Accuracy (acc)'),
+        plt.plot(get_x(loss), loss, label='Loss (loss)'),
+        plt.plot(get_x(val_acc), val_acc, label='Validation Accuracy (val_acc)'),
+        plt.plot(get_x(val_loss), val_loss, label='Validation Loss (val_loss)')
       ]
     except Exception as exc:
       import ipdb; ipdb.set_trace()
-      foo = 1
-    plt.legend(handles)
+    plt.legend()
 
   if find_lr:
     figs.append(plt.figure())
