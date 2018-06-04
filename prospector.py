@@ -662,8 +662,8 @@ def hyperopt():
         'log': [False],
         'truncate_ratio': [1],
         'find_lr': [False],
-        'stop_early': [True],
-        'epochs': [10],
+        'stop_early': [False],
+        'epochs': [100],
         'lr': [3e-4],
         'decay': [3e-7],
         'norm_hack': [False],
@@ -700,12 +700,17 @@ def hyperopt():
   print('results:')
   pprint(results)
 
+  # TODO XXX pickle instead
+
+  '''
   results_fname = 'hyperparam-scores.txt'
+  with open(results_fname
   with open(results_fname, 'a+') as f:
     f.seek(-1, os.SEEK_END)
     filehandle.truncate()
     f.write(',\n' + pformat(results)[1:])
   print('results written to %s' % results_fname)
+  '''
 
   import ipdb; ipdb.set_trace()
 
