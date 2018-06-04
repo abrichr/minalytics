@@ -681,6 +681,7 @@ def hyperopt():
         'record_stats': [False]
       }
     ]
+    pprint(param_grid)
     for p in param_grid:
       items = sorted(p.items())
       if not items:
