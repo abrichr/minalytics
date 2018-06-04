@@ -681,7 +681,7 @@ def hyperopt():
         'batch_norm': [False, True],
         'reduce_lr_on_plateau': [True],
         'data_augmentation': [True],
-        'record_stats': [True]
+        'record_stats': [False]
       }
     ]
     pprint(param_grid)
