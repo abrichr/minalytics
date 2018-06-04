@@ -770,11 +770,6 @@ def get_full_data(
         patch = get_patch_from_grid(grid, row[lon_col], row[lat_col], min_val,
             patch_size_m=MAG_PATCH_SIZE_M)
         if patch is not None:
-          try:
-            print('patch.min():', patch.min())
-          except Exception as exc:
-            print('exc: %s' % exc)
-        if patch is not None:
           if show_patches:
             plt.imshow(patch)
             plt.show()
