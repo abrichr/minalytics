@@ -243,7 +243,8 @@ def run(
     rotation_range=0,
 
     batch_norm=True,
-    reduce_lr_on_plateau=True
+    reduce_lr_on_plateau=True,
+    record_stats=True
 ):
 
   (x_train, y_train), (x_test, y_test) = load_data(
@@ -438,8 +439,9 @@ def run(
         import ipdb; ipdb.set_trace()
         foo = 1
 
-  mcb = MyCallback(model)
-  #callbacks.append(mcb)
+  if record_stats:
+    mcb = MyCallback(model)
+    callbacks.append(mcb)
 
   print('x_train min: %.5f, max: %.5f, mean: %.5f, std: %.5f' % (
     x_train.min(), x_train.max(), x_train.mean(), x_train.std()))
@@ -674,7 +676,9 @@ def hyperopt():
         'featurewise_std_normalization': [False],
         'rotation_range': [180],
         'batch_norm': [True],
-        'reduce_lr_on_plateau': [True]
+        'reduce_lr_on_plateau': [True],
+        'data_augmentation': [False],
+        'record_stats': [False]
       }
     ]
     for p in param_grid:
