@@ -693,14 +693,13 @@ def hyperopt():
   results = []
   for param_set in param_sets():
     if param_set:
-      print('param_set: %s' % param_set)
+      print('param_set:\n%s' % pformat(param_set))
       score = run(**param_set)
       #score = np.random.random()
       results.append((score, param_set))
     else:
       print('param set was None')
   results.sort(key=lambda tup: tup[0])
-  from pprint import pprint
   print('results:')
   pprint(results)
 
