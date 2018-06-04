@@ -80,6 +80,7 @@ def get_empty_patches(grid, nonempty_lon_lat_tups, patch_size_m):
   lat_range = max_lat - min_lat
   grid_min = grid.arr.min()
   
+  num_empty = 0
   while len(empty_patches) < len(nonempty_lon_lat_tups):
     lon = min_lon + np.random.random_sample() * lon_range
     lat = min_lat + np.random.random_sample() * lat_range
@@ -95,13 +96,14 @@ def get_empty_patches(grid, nonempty_lon_lat_tups, patch_size_m):
       continue
     patch, x0, x1, y0, y1 = rval 
     if np.any(patch == grid_min):
-      print('Empty vals in patch, ignoring...')
+      num_empty += 1
       continue
     ignore_mask_patch = ignore_mask[x0:x1, y0:y1]
     if any(np.nonzero(ignore_mask_patch)):
       print('Patch overlapped with knowon mine, ignoring...')
       continue
     empty_patches.append(patch)
+  print('Ignored %d empty patches' % num_empty)
 
   return empty_patches
 
@@ -677,7 +679,7 @@ def hyperopt():
         'rotation_range': [180],
         'batch_norm': [True],
         'reduce_lr_on_plateau': [True],
-        'data_augmentation': [False],
+        'data_augmentation': [True],
         'record_stats': [False]
       }
     ]
