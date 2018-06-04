@@ -126,7 +126,8 @@ logger.setLevel(logging.DEBUG if DEBUG else logging.INFO)
 
 try:
   from .gdal_grid import GDALGrid
-except:
+except Exception as exc:
+  print('exception: %s' % exc)
   from gdal_grid import GDALGrid
 
 from collections import Counter

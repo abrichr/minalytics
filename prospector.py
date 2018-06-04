@@ -42,7 +42,8 @@ try:
       BINARY_MAGNETIC_GRID_PATH
   )
   from .utils import LR_Find
-except:
+except Exception as exc:
+  print('exception: %s' % exc)
   from gdal_grid import GDALGrid
   from common import (
       get_full_data,
