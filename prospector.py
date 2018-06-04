@@ -665,22 +665,23 @@ def hyperopt():
       {
         'log': [False],
         'truncate_ratio': [1],
-        'find_lr': [False],
+        'find_lr': [True],
         'stop_early': [False],
         'epochs': [100],
-        'lr': [3e-4],
-        'decay': [3e-7],
+        'lr': [1e-4, 3e-4, 1e-3],
+        'decay': [1e-7, 3e-7, 1e-6],
         'norm_hack': [False],
-        'double_layers': [True],
+        'double_layers': [False, True],
         'norm_bounds': [
           (-14.07, 144.3),
+          (-100, 100),
         ],
-        'featurewise_std_normalization': [False],
-        'rotation_range': [180],
-        'batch_norm': [True],
+        'featurewise_std_normalization': [False, True],
+        'rotation_range': [0, 180],
+        'batch_norm': [False, True],
         'reduce_lr_on_plateau': [True],
         'data_augmentation': [True],
-        'record_stats': [False]
+        'record_stats': [True]
       }
     ]
     pprint(param_grid)
