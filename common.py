@@ -85,7 +85,7 @@ MAG_STRIDE_SIZE_M = 5000
 NUM_PCA_COMPONENTS = 10
 
 # Set to True for verbose logging
-DEBUG = True
+DEBUG = False
 
 # Latitude and longitude of mining sites to ignore (outliers)
 IGNORE_LAT_LON_TUPS = [
