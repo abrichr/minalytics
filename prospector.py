@@ -669,7 +669,7 @@ def hyperopt():
       {
         'log': [False],
         'truncate_ratio': [1],
-        'find_lr': [True, False],
+        'find_lr': [False],
         'stop_early': [False],
         'epochs': [20],
         'lr': [1e-4, 3e-4, 1e-3],
