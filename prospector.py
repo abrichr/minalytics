@@ -536,34 +536,35 @@ def run(
   )
   '''
 
-  figs.append(plt.figure())
-  acc = history.history.get('acc')
-  loss = history.history.get('loss')
-  val_acc = history.history.get('val_acc')
-  val_loss = history.history.get('val_loss')
-
-  if acc or loss or val_acc or val_loss:
-    print('acc: %s' % acc)
-    hipplot(acc)
-    print('loss: %s' % loss)
-    hipplot(loss)
-    print('val_acc: %s' % val_acc)
-    hipplot(val_acc)
-    print('val_loss: %s' % val_loss)
-    hipplot(val_loss)
-    assert len(acc) == len(loss) == len(val_acc) == len(val_loss)
-    get_x = lambda y: np.linspace(0, len(y), num=len(y))
+  if record_stats:
     figs.append(plt.figure())
-    try:
-      handles = [
-        plt.plot(get_x(acc), acc, label='Accuracy (acc)'),
-        plt.plot(get_x(loss), loss, label='Loss (loss)'),
-        plt.plot(get_x(val_acc), val_acc, label='Validation Accuracy (val_acc)'),
-        plt.plot(get_x(val_loss), val_loss, label='Validation Loss (val_loss)')
-      ]
-    except Exception as exc:
-      import ipdb; ipdb.set_trace()
-    plt.legend()
+    acc = history.history.get('acc')
+    loss = history.history.get('loss')
+    val_acc = history.history.get('val_acc')
+    val_loss = history.history.get('val_loss')
+
+    if acc or loss or val_acc or val_loss:
+      print('acc: %s' % acc)
+      hipplot(acc)
+      print('loss: %s' % loss)
+      hipplot(loss)
+      print('val_acc: %s' % val_acc)
+      hipplot(val_acc)
+      print('val_loss: %s' % val_loss)
+      hipplot(val_loss)
+      assert len(acc) == len(loss) == len(val_acc) == len(val_loss)
+      get_x = lambda y: np.linspace(0, len(y), num=len(y))
+      figs.append(plt.figure())
+      try:
+        handles = [
+          plt.plot(get_x(acc), acc, label='Accuracy (acc)'),
+          plt.plot(get_x(loss), loss, label='Loss (loss)'),
+          plt.plot(get_x(val_acc), val_acc, label='Validation Accuracy (val_acc)'),
+          plt.plot(get_x(val_loss), val_loss, label='Validation Loss (val_loss)')
+        ]
+      except Exception as exc:
+        import ipdb; ipdb.set_trace()
+      plt.legend()
 
   if find_lr:
     figs.append(plt.figure())
@@ -666,9 +667,9 @@ def hyperopt():
       {
         'log': [False],
         'truncate_ratio': [1],
-        'find_lr': [True],
+        'find_lr': [True, False],
         'stop_early': [False],
-        'epochs': [100],
+        'epochs': [20],
         'lr': [1e-4, 3e-4, 1e-3],
         'decay': [1e-7, 3e-7, 1e-6],
         'norm_hack': [False],
