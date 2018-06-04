@@ -31,7 +31,7 @@ from pprint import pprint, pformat
 from random import shuffle
 
 from gdal_grid import GDALGrid
-from minalytics import (
+from common import (
     get_full_data,
     get_patch_from_grid,
     get_lat_lon_cols,
