@@ -439,7 +439,7 @@ def run(
         foo = 1
 
   mcb = MyCallback(model)
-  callbacks.append(mcb)
+  #callbacks.append(mcb)
 
   print('x_train min: %.5f, max: %.5f, mean: %.5f, std: %.5f' % (
     x_train.min(), x_train.max(), x_train.mean(), x_train.std()))
