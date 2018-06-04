@@ -589,6 +589,8 @@ def run(
     params.sort(key=lambda tup: tup[0])
     digest = hashlib.sha224(str(params).encode('utf-8')).hexdigest()
     # TODO: print params in title
+    if not os.path.exists('out'):
+      os.mkdir('out')
     for i_fig, fig in enumerate(figs):
       filename = 'out/prospector_%s_%d.png' % (digest, i_fig)
       print('Saving to file %s...' % filename)
