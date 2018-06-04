@@ -30,17 +30,30 @@ from matplotlib import pyplot as plt
 from pprint import pprint, pformat
 from random import shuffle
 
-from gdal_grid import GDALGrid
-from common import (
-    get_full_data,
-    get_patch_from_grid,
-    get_lat_lon_cols,
-    myrepr,
-    cache,
-    MAG_PATCH_SIZE_M,
-    BINARY_MAGNETIC_GRID_PATH
-)
-from utils import LR_Find
+try:
+  from .gdal_grid import GDALGrid
+  from .common import (
+      get_full_data,
+      get_patch_from_grid,
+      get_lat_lon_cols,
+      myrepr,
+      cache,
+      MAG_PATCH_SIZE_M,
+      BINARY_MAGNETIC_GRID_PATH
+  )
+  from .utils import LR_Find
+except:
+  from gdal_grid import GDALGrid
+  from common import (
+      get_full_data,
+      get_patch_from_grid,
+      get_lat_lon_cols,
+      myrepr,
+      cache,
+      MAG_PATCH_SIZE_M,
+      BINARY_MAGNETIC_GRID_PATH
+  )
+  from utils import LR_Find
 
 save_dir = os.path.join(os.getcwd(), 'saved_models')
 model_name = 'keras_magnetism_trained_model.h5'

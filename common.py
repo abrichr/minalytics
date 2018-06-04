@@ -124,7 +124,10 @@ logging.basicConfig(format=log_format, level=logging.WARN)
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG if DEBUG else logging.INFO)
 
-from gdal_grid import GDALGrid
+try:
+  from .gdal_grid import GDALGrid
+except:
+  from gdal_grid import GDALGrid
 
 from collections import Counter
 from functools import partial
@@ -161,8 +164,9 @@ def myrepr(arg):
     return repr(arg)
 
 try:
-  cache = percache.Cache(".cache", livesync=True, repr=myrepr)
-except:
+  cache = percache.Cache(".percache", livesync=True, repr=myrepr)
+except Exception as exc:
+  print('Exception creating cache: %s' % exc)
   def cache(func):
     def wrapper(*args, **kwargs):
       read_cache = kwargs.get('read_cache', True)
