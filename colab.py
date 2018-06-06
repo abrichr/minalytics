@@ -85,8 +85,7 @@ except:
 ! ls -alh
 ! git clone git@bitbucket.org:abrichr/minalytics.git
 ! ls -alh minalytics
-! cd minalytics
-! git checkout {GIT_BRANCH}
+! cd minalytics && git checkout {GIT_BRANCH}
 
 from minalytics import prospector
 prospector.hyperopt()
