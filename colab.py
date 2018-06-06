@@ -4,7 +4,13 @@ https://colab.research.google.com/
 
 To train on GPUs, go to Edit -> Notebook Settings and set
 "Hardware accelerator" to "GPU".
+
+Get the value for SSO_CODE by signing in at the link printed
+to stdout starting with https://accounts.google.com/o/oauth2/auth?...
 '''
+
+SSO_CODE = '...'
+GIT_BRANCH = 'master'
 
 import os, shutil
 
@@ -32,9 +38,7 @@ for fname, gid in gid_by_fname.items():
       ! wget "https://docs.google.com/uc?id=0B3X9GlR6EmbnQ0FtZmJJUXEyRTA&export=download" -O gdrive
       ! chmod +x gdrive
     print('Downloading %s (%s)' % (fname, gid))
-    # get the SSO code by signing in at the link printed to stdout:
-    # https://accounts.google.com/o/oauth2/auth?...
-    ! echo "<sso_code>" | ./gdrive download {gid}
+    ! echo '{SSO_CODE}' | ./gdrive download {gid}
     ! mkdir -p {dir}
     ! mv '{fname}' {dir}
 
@@ -81,6 +85,8 @@ except:
 ! ls -alh
 ! git clone git@bitbucket.org:abrichr/minalytics.git
 ! ls -alh minalytics
+! cd minalytics
+! git checkout {GIT_BRANCH}
 
 from minalytics import prospector
 prospector.hyperopt()
